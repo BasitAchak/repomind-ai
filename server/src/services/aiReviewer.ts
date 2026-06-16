@@ -23,10 +23,10 @@ type GroqChatResponse = {
 }
 
 const mockReview: ReviewResult = {
-  bugs: ['No obvious bugs found in this mock review.'],
-  securityIssues: ['Security analysis will be added in a later phase.'],
-  codeQuality: ['This is a placeholder code quality review.'],
-  improvements: ['Connect this route to a real AI provider later.'],
+  bugs: [],
+  securityIssues: [],
+  codeQuality: [],
+  improvements: [],
 }
 
 const groqModels = ['llama-3.1-8b-instant', 'llama-3.3-70b-versatile'] as const
@@ -212,55 +212,123 @@ function uniqueStrings(values: string[]) {
   return [...new Set(values.map((value) => value.trim()).filter(Boolean))]
 }
 
-function detectObviousBugFindings(reviewRequest: ReviewRequest) {
-  const findings: string[] = []
-  const code = reviewRequest.code
+function analyzeCodeHeuristics(reviewRequest: ReviewRequest): ReviewResult {
+  const bugs: string[] = []
+  const securityIssues: string[] = []
+  const codeQuality: string[] = []
+  const improvements: string[] = []
+  const normalizedCode = reviewRequest.code.replace(/\r\n/g, '\n')
+  const lines = normalizedCode.split('\n')
   const language = reviewRequest.language.toLowerCase()
+  const filePath = reviewRequest.filePath?.toLowerCase() ?? ''
   const isTypeScriptLike =
-    language.includes('typescript') || language.includes('javascript') || /\.(ts|tsx|js|jsx)$/i.test(reviewRequest.filePath ?? '')
-  const normalizedCode = code.replace(/\r\n/g, '\n')
+    language.includes('typescript') ||
+    language.includes('javascript') ||
+    /\.(ts|tsx|js|jsx)$/i.test(filePath)
+  const isReactFile =
+    language.includes('react') ||
+    filePath.endsWith('.tsx') ||
+    filePath.endsWith('.jsx') ||
+    /useState\s*\(|useEffect\s*\(|return\s*\(/.test(normalizedCode)
 
-  const add = (value: string) => {
-    if (!findings.includes(value)) {
-      findings.push(value)
+  const addUnique = (bucket: string[], value: string) => {
+    if (!bucket.includes(value)) {
+      bucket.push(value)
     }
   }
 
+  const functionMatches = normalizedCode.match(/\bfunction\b|\=\>\s*\{/g) ?? []
+  const useStateMatches = normalizedCode.match(/\buseState\s*\(/g) ?? []
+  const useEffectMatches = normalizedCode.match(/\buseEffect\s*\(/g) ?? []
+
   if (isTypeScriptLike && /\bany\b/.test(normalizedCode)) {
-    add('Unsafe `any` usage can hide type errors and let runtime bugs slip through.')
+    addUnique(bugs, 'Unsafe `any` usage can hide type errors and let runtime bugs slip through.')
+    addUnique(codeQuality, 'Type safety is weakened by `any`, which makes runtime regressions easier to miss.')
+  }
+
+  if (/as\s+any\b/.test(normalizedCode) || /\/\/\s*@ts-ignore/.test(normalizedCode)) {
+    addUnique(codeQuality, 'Type assertions or ignores are suppressing the compiler instead of fixing the underlying type issue.')
   }
 
   if (/catch\s*\(\s*[^)]*\s*\)\s*\{\s*\}/s.test(normalizedCode) || /catch\s*\{\s*\}/s.test(normalizedCode)) {
-    add('Empty `catch` blocks swallow failures and can hide broken async or state-update flows.')
+    addUnique(bugs, 'Empty `catch` blocks swallow failures and can hide broken async or state-update flows.')
+    addUnique(codeQuality, 'Empty error handling hides real failures and makes the control flow hard to trust.')
+    addUnique(improvements, 'Return or surface the error instead of silently swallowing it.')
   }
 
   if (/setInterval\s*\(/.test(normalizedCode) && /useEffect\s*\(/.test(normalizedCode) && !/clearInterval\s*\(/.test(normalizedCode)) {
-    add('`setInterval` is created without cleanup, so the timer can leak when the component unmounts.')
+    addUnique(bugs, '`setInterval` is created without cleanup, so the timer can leak when the component unmounts.')
   }
 
   if (/addEventListener\s*\(/.test(normalizedCode) && /useEffect\s*\(/.test(normalizedCode) && !/removeEventListener\s*\(/.test(normalizedCode)) {
-    add('Event listeners are registered without cleanup, which can create duplicate handlers or leaks.')
+    addUnique(bugs, 'Event listeners are registered without cleanup, which can create duplicate handlers or leaks.')
   }
 
   if (/fetch\s*\(/.test(normalizedCode) && !/response\.ok/.test(normalizedCode) && !/status/.test(normalizedCode)) {
-    add('`fetch` calls do not check the HTTP status, so failed requests may be treated as successful responses.')
+    addUnique(bugs, '`fetch` calls do not check the HTTP status, so failed requests may be treated as successful responses.')
+    addUnique(improvements, 'Check `response.ok` and surface request failures to the user.')
   }
 
   if (/(^|[^=!])==([^=]|$)/.test(normalizedCode) || /(^|[^=!])!=([^=]|$)/.test(normalizedCode)) {
-    add('Loose equality can cause coercion bugs and unexpected branching.')
+    addUnique(bugs, 'Loose equality can cause coercion bugs and unexpected branching.')
   }
 
-  return findings.slice(0, 3)
-}
+  if (/eval\s*\(|new Function\s*\(/.test(normalizedCode)) {
+    addUnique(securityIssues, 'Dynamic code execution can create security and maintainability risks.')
+  }
 
-function mergeReviewWithHeuristics(reviewRequest: ReviewRequest, review: ReviewResult): ReviewResult {
-  const bugFindings = uniqueStrings([...detectObviousBugFindings(reviewRequest), ...review.bugs])
+  if (/innerHTML\s*=|dangerouslySetInnerHTML/.test(normalizedCode)) {
+    addUnique(securityIssues, 'Direct HTML injection surfaces can lead to XSS if the content is not strictly trusted.')
+  }
+
+  if (/console\.(log|debug|info)\s*\(/.test(normalizedCode)) {
+    addUnique(improvements, 'Remove debug logging before shipping to keep runtime noise low.')
+  }
+
+  if (/TODO|FIXME/i.test(normalizedCode)) {
+    addUnique(improvements, 'Resolve tracked TODO/FIXME notes or turn them into explicit follow-up tasks.')
+  }
+
+  if (isReactFile && useStateMatches.length >= 5 && lines.length >= 150) {
+    addUnique(codeQuality, 'This React file carries several pieces of state and likely mixes multiple responsibilities in one component.')
+    addUnique(improvements, 'Extract reusable hooks or smaller components to reduce the component surface area.')
+  }
+
+  if (isReactFile && useEffectMatches.length >= 3) {
+    addUnique(codeQuality, 'Multiple effects suggest the component may be coordinating too many side effects in one place.')
+  }
+
+  if (lines.length >= 250) {
+    addUnique(codeQuality, 'The file is fairly large, which can make maintenance and bug isolation harder.')
+    addUnique(improvements, 'Split the file into smaller modules or components to improve readability and testability.')
+  }
+
+  if (functionMatches.length >= 10) {
+    addUnique(codeQuality, 'The file contains many functions, which suggests several responsibilities are bundled together.')
+  }
+
+  if (/window\.localStorage|localStorage/.test(normalizedCode) && /try\s*\{[\s\S]*localStorage[\s\S]*\}\s*catch\s*\{\s*\}/s.test(normalizedCode)) {
+    addUnique(codeQuality, 'Storage errors are swallowed, which can hide persistence failures in production.')
+  }
+
+  if (bugs.length === 0 && securityIssues.length === 0 && codeQuality.length === 0 && improvements.length === 0) {
+    addUnique(codeQuality, 'No strong defects were detected automatically, so this file should still be checked manually for logic edge cases.')
+  }
 
   return {
-    bugs: bugFindings,
-    securityIssues: uniqueStrings(review.securityIssues),
-    codeQuality: uniqueStrings(review.codeQuality),
-    improvements: uniqueStrings(review.improvements),
+    bugs: uniqueStrings(bugs),
+    securityIssues: uniqueStrings(securityIssues),
+    codeQuality: uniqueStrings(codeQuality),
+    improvements: uniqueStrings(improvements),
+  }
+}
+
+function mergeReviewResults(primary: ReviewResult, secondary: ReviewResult): ReviewResult {
+  return {
+    bugs: uniqueStrings([...primary.bugs, ...secondary.bugs]),
+    securityIssues: uniqueStrings([...primary.securityIssues, ...secondary.securityIssues]),
+    codeQuality: uniqueStrings([...primary.codeQuality, ...secondary.codeQuality]),
+    improvements: uniqueStrings([...primary.improvements, ...secondary.improvements]),
   }
 }
 
@@ -308,7 +376,7 @@ async function callGroqOnce(
   const apiKey = getGroqApiKey()
 
   if (!apiKey) {
-    return getMockReview()
+    return analyzeCodeHeuristics(reviewRequest)
   }
 
   const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
@@ -379,7 +447,7 @@ async function callGroq(reviewRequest: ReviewRequest): Promise<ReviewResult> {
   const apiKey = getGroqApiKey()
 
   if (!apiKey) {
-    return mergeReviewWithHeuristics(reviewRequest, getMockReview())
+    return analyzeCodeHeuristics(reviewRequest)
   }
 
   let lastError: Error | null = null
@@ -402,5 +470,5 @@ async function callGroq(reviewRequest: ReviewRequest): Promise<ReviewResult> {
 
 export async function reviewCode(reviewRequest: ReviewRequest): Promise<ReviewResult> {
   const review = await callGroq(reviewRequest)
-  return mergeReviewWithHeuristics(reviewRequest, review)
+  return mergeReviewResults(review, analyzeCodeHeuristics(reviewRequest))
 }

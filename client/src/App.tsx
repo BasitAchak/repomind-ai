@@ -1121,7 +1121,7 @@ function App() {
         <div className="results-header results-header--stacked">
           <div>
             <h2>Review Results</h2>
-            <p>Mock backend response for Phase 1 or Groq-powered review in Phase 2.</p>
+            <p>AI-generated review results for pasted code and GitHub files.</p>
           </div>
 
           <div className="results-actions">
