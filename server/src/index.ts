@@ -18,13 +18,17 @@ const app = express()
 const port = 5000
 const allowedOrigins = [
   'http://localhost:5173',
+  'http://localhost:5174',
+  'http://localhost:5175',
   'https://repomind-ai-promax.vercel.app',
 ]
 
 app.use(
   cors({
     origin(origin, callback) {
-      if (!origin) return callback(null, true)
+      if (!origin) {
+        return callback(null, true)
+      }
 
       if (allowedOrigins.includes(origin)) {
         return callback(null, true)
