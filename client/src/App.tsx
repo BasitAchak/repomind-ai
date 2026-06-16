@@ -578,7 +578,7 @@ function App() {
   return (
     <main className="page-shell">
       <section className="hero-panel">
-        <div className="eyebrow">Phase 6</div>
+        <div className="eyebrow">RepoMind AI</div>
         <h1>RepoMind AI</h1>
         <p className="subtitle">AI code reviewer for students and developers</p>
 
