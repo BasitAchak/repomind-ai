@@ -1,0 +1,11 @@
+{
+  "name": "repomind-ai-server",
+  "private": true,
+  "version": "1.0.0",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js"
+  }
+}
