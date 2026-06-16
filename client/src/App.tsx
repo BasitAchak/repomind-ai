@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import './App.css'
+import { API_URL } from './lib/api'
 
 type ReviewResult = {
   bugs: string[]
@@ -155,33 +156,6 @@ function formatBulletList(items: string[], emptyText = '- None detected') {
   }
 
   return items.map((item) => `- ${item}`).join('\n')
-}
-
-function getPathFolderSignals(tree: GitHubTreeResult | null) {
-  if (!tree) {
-    return []
-  }
-
-  const folderCounts = new Map<string, number>()
-
-  for (const file of tree.files) {
-    const segments = file.path.split('/').filter(Boolean)
-
-    if (segments.length > 1) {
-      const topLevel = segments[0]
-      folderCounts.set(topLevel, (folderCounts.get(topLevel) ?? 0) + 1)
-    }
-
-    if (segments.length > 2) {
-      const nested = segments.slice(0, 2).join('/')
-      folderCounts.set(nested, (folderCounts.get(nested) ?? 0) + 1)
-    }
-  }
-
-  return [...folderCounts.entries()]
-    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
-    .slice(0, 6)
-    .map(([path, count]) => `${path} (${count} files)`)
 }
 
 function getTechnologySignals(projectInfo: GitHubProjectInfo | null) {
@@ -688,7 +662,7 @@ function App() {
     setCopyStatus('')
 
     try {
-      const response = await fetch('http://localhost:5000/api/review', {
+      const response = await fetch(`${API_URL}/api/review`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -794,9 +768,7 @@ function App() {
     setGithubLoading(true)
 
     try {
-      const response = await fetch(
-        `http://localhost:5000/api/github/parse?url=${encodeURIComponent(githubUrl)}`,
-      )
+      const response = await fetch(`${API_URL}/api/github/parse?url=${encodeURIComponent(githubUrl)}`)
       const data = (await response.json()) as ParsedGitHubRepo & { error?: string }
 
       if (!response.ok) {
@@ -827,7 +799,7 @@ function App() {
 
     try {
       const response = await fetch(
-        `http://localhost:5000/api/github/project-info?url=${encodeURIComponent(githubUrl)}`,
+        `${API_URL}/api/github/project-info?url=${encodeURIComponent(githubUrl)}`,
       )
       const data = (await response.json()) as GitHubProjectInfo & { error?: string }
 
@@ -860,7 +832,7 @@ function App() {
 
     try {
       const response = await fetch(
-        `http://localhost:5000/api/github/repository-summary?url=${encodeURIComponent(githubUrl)}`,
+        `${API_URL}/api/github/repository-summary?url=${encodeURIComponent(githubUrl)}`,
       )
       const data = (await response.json()) as GitHubRepositorySummary & { error?: string }
 
@@ -929,7 +901,7 @@ function App() {
     setMultiFileReviewLoading(true)
 
     try {
-      const response = await fetch('http://localhost:5000/api/github/multi-file-review', {
+      const response = await fetch(`${API_URL}/api/github/multi-file-review`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -967,9 +939,7 @@ function App() {
 
     try {
       const response = await fetch(
-        `http://localhost:5000/api/github/file?url=${encodeURIComponent(
-          githubUrl,
-        )}&path=${encodeURIComponent(path)}`,
+        `${API_URL}/api/github/file?url=${encodeURIComponent(githubUrl)}&path=${encodeURIComponent(path)}`,
       )
       const data = (await response.json()) as GitHubFileResult & { error?: string }
 
@@ -1001,9 +971,7 @@ function App() {
     setGithubTreeLoading(true)
 
     try {
-      const response = await fetch(
-        `http://localhost:5000/api/github/tree?url=${encodeURIComponent(githubUrl)}`,
-      )
+      const response = await fetch(`${API_URL}/api/github/tree?url=${encodeURIComponent(githubUrl)}`)
       const data = (await response.json()) as GitHubTreeResult & { error?: string }
 
       if (!response.ok) {
@@ -1605,13 +1573,15 @@ function App() {
                   </div>
 
                   <div className="multi-review-grid">
-                    {[
-                      ['Architecture Issues', multiFileReview.architectureIssues],
-                      ['Security Risks', multiFileReview.securityRisks],
-                      ['State Management Issues', multiFileReview.stateManagementIssues],
-                      ['Cross-file Concerns', multiFileReview.crossFileConcerns],
-                      ['Recommended Next Steps', multiFileReview.recommendedNextSteps],
-                    ].map(([title, items]) => (
+                    {(
+                      [
+                        ['Architecture Issues', multiFileReview.architectureIssues],
+                        ['Security Risks', multiFileReview.securityRisks],
+                        ['State Management Issues', multiFileReview.stateManagementIssues],
+                        ['Cross-file Concerns', multiFileReview.crossFileConcerns],
+                        ['Recommended Next Steps', multiFileReview.recommendedNextSteps],
+                      ] as Array<[string, string[]]>
+                    ).map(([title, items]) => (
                       <article className="result-card" key={title}>
                         <h3>{title}</h3>
                         {items.length === 0 ? (
