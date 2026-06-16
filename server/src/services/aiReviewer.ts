@@ -119,18 +119,23 @@ function buildReviewGuidance(reviewRequest: ReviewRequest) {
     'Review only what is present in the provided content.',
     'Do not invent issues.',
     'Do not say something is missing if it already exists.',
+    'Do not stop after finding one issue.',
+    'Find multiple independent issues when they exist.',
+    'For intentionally buggy code, report all major problems.',
     'Do not label minor suggestions as bugs.',
-    'Use "bugs" only for actual correctness problems.',
-    'Use "securityIssues" only for real security risks.',
-    'Use "codeQuality" for concrete maintainability, readability, architecture, type-safety, and configuration concerns grounded in the file.',
-    'Use "improvements" for optional but useful refactors, UX, and structural enhancements grounded in the file.',
+    'Use "bugs" for runtime failures, correctness issues, broken logic, division by zero, null/undefined mistakes, bad control flow, and other behavior that can fail at runtime.',
+    'Use "securityIssues" for exploitable or sensitive-data risks, including hardcoded secrets, SQL injection, command injection, path traversal, shell=True risks, unsafe eval/exec, unsafe deserialization, insecure password handling, plaintext password comparison/storage, and weak authentication/authorization logic.',
+    'Use "codeQuality" for maintainability, readability, architecture, type-safety, and reliability concerns grounded in the file.',
+    'Use "improvements" for concrete fixes and refactors that directly address the findings.',
     'When the code is React, React Native, or TypeScript, look for large components, too many responsibilities in one file, repeated state-reset logic, weak error handling, password/auth UX concerns, missing loading states, missing disabled states, unsafe any usage, duplicated UI patterns, extractable hooks/components, stale state, broken conditional logic, and cleanup bugs.',
+    'When the code is Python, specifically inspect sqlite query construction, os.system, subprocess with shell=True, hardcoded secrets, missing context managers, exception handling, zero division, missing input validation, and unsafe file/path handling.',
     'If obvious runtime, logic, or state-flow defects exist, put them in bugs even if the file also has maintainability issues.',
     'Only leave bugs empty when there are truly no correctness problems in the provided code.',
     'If there are no real security risks, securityIssues can be empty.',
     'But do not leave codeQuality or improvements empty unless the file is genuinely very clean and there are no grounded maintainability, readability, architecture, UX, or type-safety observations to make.',
     'Each non-empty finding must cite a specific code pattern from the provided file, such as a function, branch, prop, state flow, repeated block, or component structure.',
     'Keep every issue specific, grounded, and concise.',
+    'Aim for up to 6 items per category, but return fewer if the evidence supports fewer.',
     'Return JSON only with this exact shape:',
     '{"bugs":[],"securityIssues":[],"codeQuality":[],"improvements":[]}',
     `Language: ${language}`,
@@ -212,6 +217,10 @@ function uniqueStrings(values: string[]) {
   return [...new Set(values.map((value) => value.trim()).filter(Boolean))]
 }
 
+function limitReviewItems(items: string[], limit = 6) {
+  return uniqueStrings(items).slice(0, limit)
+}
+
 function analyzeCodeHeuristics(reviewRequest: ReviewRequest): ReviewResult {
   const bugs: string[] = []
   const securityIssues: string[] = []
@@ -221,6 +230,8 @@ function analyzeCodeHeuristics(reviewRequest: ReviewRequest): ReviewResult {
   const lines = normalizedCode.split('\n')
   const language = reviewRequest.language.toLowerCase()
   const filePath = reviewRequest.filePath?.toLowerCase() ?? ''
+  const isPythonFile =
+    language.includes('python') || filePath.endsWith('.py') || filePath.endsWith('.pyw')
   const isTypeScriptLike =
     language.includes('typescript') ||
     language.includes('javascript') ||
@@ -256,6 +267,89 @@ function analyzeCodeHeuristics(reviewRequest: ReviewRequest): ReviewResult {
     addUnique(improvements, 'Return or surface the error instead of silently swallowing it.')
   }
 
+  if (
+    /password\s*=\s*["'`][^"'`]{4,}["'`]/i.test(normalizedCode) ||
+    /const\s+\w*password\w*\s*=\s*["'`][^"'`]{4,}["'`]/i.test(normalizedCode) ||
+    /["'`][^"'`]{4,}["'`]\s*===?\s*\w*password\w*/i.test(normalizedCode)
+  ) {
+    addUnique(bugs, 'Hardcoded password-like values create a serious authentication and credential-management bug.')
+    addUnique(securityIssues, 'Credentials are embedded directly in code, which is unsafe and can leak sensitive access secrets.')
+    addUnique(improvements, 'Move credentials into secure authentication/session handling and store secrets outside the source code.')
+  }
+
+  if (
+    isPythonFile &&
+    /API_KEY|SECRET|TOKEN|PASSWORD\s*=\s*["'`][^"'`]{6,}["'`]/.test(normalizedCode)
+  ) {
+    addUnique(bugs, 'A hardcoded secret or API key is stored directly in the source code.')
+    addUnique(securityIssues, 'Secrets should not be embedded in code because they can leak into source control and logs.')
+    addUnique(improvements, 'Load secrets from environment variables or a secrets manager instead of hardcoding them.')
+  }
+
+  if (
+    /f["'].*(select|insert|update|delete|drop|alter).*{.*}.*["']/is.test(normalizedCode) ||
+    /query\s*=\s*f["'][\s\S]*(select|insert|update|delete|drop|alter)[\s\S]*{[\s\S]+}/i.test(normalizedCode) ||
+    /cursor\.execute\s*\(\s*query\s*\)/i.test(normalizedCode) && /\bf["']/.test(normalizedCode)
+  ) {
+    addUnique(bugs, 'SQL is being constructed with user-controlled string interpolation, which is vulnerable to SQL injection.')
+    addUnique(securityIssues, 'Use parameterized queries instead of interpolated SQL to prevent SQL injection.')
+    addUnique(improvements, 'Bind query parameters with placeholders rather than building SQL strings manually.')
+  }
+
+  if (
+    /sqlite3\.connect\(/i.test(normalizedCode) &&
+    /cursor\.execute\(\s*query\s*\)/i.test(normalizedCode) &&
+    /password/i.test(normalizedCode)
+  ) {
+    addUnique(codeQuality, 'The login flow mixes password handling directly into SQL access, which is brittle and unsafe.')
+  }
+
+  if (
+    /os\.system\s*\(/i.test(normalizedCode) ||
+    /subprocess\.(call|run|popen|check_call|check_output)\s*\(/i.test(normalizedCode)
+  ) {
+    addUnique(bugs, 'Shell commands are built from raw input, which can lead to command injection.')
+    addUnique(securityIssues, 'Avoid shell command execution with untrusted input because it can be exploited to run arbitrary commands.')
+    addUnique(improvements, 'Use safer APIs with argument arrays and sanitize or validate all user-controlled path input.')
+  }
+
+  if (/shell\s*=\s*True/i.test(normalizedCode)) {
+    addUnique(securityIssues, 'Using `shell=True` exposes the command to shell injection when any part of the command is user-controlled.')
+    addUnique(bugs, 'Running subprocess commands with `shell=True` makes command injection much easier to exploit.')
+  }
+
+  if (/path\s*\+\s*["'`].*|["'`].*\+\s*path/i.test(normalizedCode) && /(os\.system|subprocess\.)/i.test(normalizedCode)) {
+    addUnique(improvements, 'Avoid string concatenation for shell commands; pass arguments explicitly and validate file paths.')
+  }
+
+  if (/(\breturn\s+)?[A-Za-z_][\w.]*\s*\/\s*[A-Za-z_][\w.]*\b/.test(normalizedCode) && !/if\s+.*==\s*0|if\s+.*!=\s*0|if\s+.*<=\s*0/.test(normalizedCode)) {
+    addUnique(bugs, 'Division can fail with a zero denominator because there is no visible guard against zero.')
+    addUnique(improvements, 'Validate the divisor before dividing and return a controlled error when it is zero.')
+  }
+
+  if (
+    /(input|username|password|filename|path|query|filename)\s*[=,]/i.test(normalizedCode) &&
+    !/if\s+.*(username|password|filename|path|query)/i.test(normalizedCode)
+  ) {
+    addUnique(codeQuality, 'User-controlled inputs appear to flow directly into sensitive operations without validation.')
+    addUnique(improvements, 'Validate and normalize user input before using it in database or filesystem operations.')
+  }
+
+  if (/(login|signin|signIn|authenticate|auth)\s*\(/i.test(normalizedCode) && /password/i.test(normalizedCode)) {
+    addUnique(bugs, 'The authentication flow appears to rely on plaintext password handling instead of proper auth/session logic.')
+    addUnique(securityIssues, 'Passwords should not be compared or stored as plaintext in application logic or SQL strings.')
+    addUnique(codeQuality, 'Authentication logic is oversimplified and likely needs a dedicated auth/session layer.')
+  }
+
+  if (
+    /(login|signin|signIn|authenticate|auth)\s*\(/i.test(normalizedCode) &&
+    /return\s+true/i.test(normalizedCode) &&
+    /password|token|session/i.test(normalizedCode)
+  ) {
+    addUnique(bugs, 'The login flow appears to use a direct boolean password check instead of proper authentication/session handling.')
+    addUnique(codeQuality, 'Authentication logic is oversimplified and likely needs a dedicated auth/session layer.')
+  }
+
   if (/setInterval\s*\(/.test(normalizedCode) && /useEffect\s*\(/.test(normalizedCode) && !/clearInterval\s*\(/.test(normalizedCode)) {
     addUnique(bugs, '`setInterval` is created without cleanup, so the timer can leak when the component unmounts.')
   }
@@ -275,6 +369,10 @@ function analyzeCodeHeuristics(reviewRequest: ReviewRequest): ReviewResult {
 
   if (/eval\s*\(|new Function\s*\(/.test(normalizedCode)) {
     addUnique(securityIssues, 'Dynamic code execution can create security and maintainability risks.')
+  }
+
+  if (/pickle\.loads\s*\(|yaml\.load\s*\(|json\.loads\s*\(/i.test(normalizedCode) && /request|input|payload|data/i.test(normalizedCode)) {
+    addUnique(securityIssues, 'Unsafe deserialization can execute attacker-controlled data or corrupt application state.')
   }
 
   if (/innerHTML\s*=|dangerouslySetInnerHTML/.test(normalizedCode)) {
@@ -316,19 +414,19 @@ function analyzeCodeHeuristics(reviewRequest: ReviewRequest): ReviewResult {
   }
 
   return {
-    bugs: uniqueStrings(bugs),
-    securityIssues: uniqueStrings(securityIssues),
-    codeQuality: uniqueStrings(codeQuality),
-    improvements: uniqueStrings(improvements),
+    bugs: limitReviewItems(bugs),
+    securityIssues: limitReviewItems(securityIssues),
+    codeQuality: limitReviewItems(codeQuality),
+    improvements: limitReviewItems(improvements),
   }
 }
 
 function mergeReviewResults(primary: ReviewResult, secondary: ReviewResult): ReviewResult {
   return {
-    bugs: uniqueStrings([...primary.bugs, ...secondary.bugs]),
-    securityIssues: uniqueStrings([...primary.securityIssues, ...secondary.securityIssues]),
-    codeQuality: uniqueStrings([...primary.codeQuality, ...secondary.codeQuality]),
-    improvements: uniqueStrings([...primary.improvements, ...secondary.improvements]),
+    bugs: limitReviewItems([...primary.bugs, ...secondary.bugs]),
+    securityIssues: limitReviewItems([...primary.securityIssues, ...secondary.securityIssues]),
+    codeQuality: limitReviewItems([...primary.codeQuality, ...secondary.codeQuality]),
+    improvements: limitReviewItems([...primary.improvements, ...secondary.improvements]),
   }
 }
 
@@ -470,5 +568,6 @@ async function callGroq(reviewRequest: ReviewRequest): Promise<ReviewResult> {
 
 export async function reviewCode(reviewRequest: ReviewRequest): Promise<ReviewResult> {
   const review = await callGroq(reviewRequest)
-  return mergeReviewResults(review, analyzeCodeHeuristics(reviewRequest))
+  const merged = mergeReviewResults(review, analyzeCodeHeuristics(reviewRequest))
+  return merged
 }
