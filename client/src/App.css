@@ -611,58 +611,6 @@ h1 {
   line-height: 1.65;
 }
 
-.rebuild-prompt-card {
-  display: grid;
-  gap: 16px;
-  padding: 20px;
-  border-radius: 22px;
-  border: 1px solid var(--border);
-  background: rgba(255, 255, 255, 0.82);
-}
-
-.rebuild-prompt-card__header {
-  display: flex;
-  justify-content: space-between;
-  gap: 16px;
-  align-items: start;
-}
-
-.rebuild-prompt-card__header h3 {
-  margin: 0 0 4px;
-  font-size: 1.08rem;
-}
-
-.rebuild-prompt-card__header p {
-  margin: 0;
-  color: var(--muted);
-}
-
-.rebuild-prompt-actions {
-  display: flex;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-
-.rebuild-prompt-textarea {
-  width: 100%;
-  box-sizing: border-box;
-  min-height: 360px;
-  padding: 18px 20px;
-  border-radius: 18px;
-  border: 1px solid var(--border);
-  background: rgba(255, 255, 255, 0.92);
-  color: var(--text-h);
-  font: inherit;
-  line-height: 1.65;
-  resize: vertical;
-}
-
-.rebuild-prompt-textarea:focus {
-  outline: none;
-  border-color: rgba(14, 165, 233, 0.58);
-  box-shadow: 0 0 0 4px rgba(14, 165, 233, 0.12);
-}
-
 .repo-tree {
   margin-top: 18px;
   display: grid;
@@ -988,20 +936,6 @@ h1 {
   .multi-file-review-card__header {
     flex-direction: column;
     align-items: start;
-  }
-
-  .rebuild-prompt-card__header {
-    flex-direction: column;
-    align-items: start;
-  }
-
-  .rebuild-prompt-actions {
-    width: 100%;
-  }
-
-  .rebuild-prompt-actions .secondary-button,
-  .rebuild-prompt-actions .review-button {
-    width: 100%;
   }
 
   .file-preview-panel__header {

@@ -139,403 +139,6 @@ function isCodeLanguage(value: string): value is (typeof languageOptions)[number
   return (languageOptions as readonly string[]).includes(value)
 }
 
-type RepositoryPromptContext = {
-  repo: ParsedGitHubRepo | null
-  projectInfo: GitHubProjectInfo | null
-  repositorySummary: GitHubRepositorySummary | null
-  tree: GitHubTreeResult | null
-}
-
-function uniqueStrings(values: Array<string | null | undefined>) {
-  return [...new Set(values.map((value) => value?.trim()).filter((value): value is string => Boolean(value)))]
-}
-
-function formatBulletList(items: string[], emptyText = '- None detected') {
-  if (items.length === 0) {
-    return emptyText
-  }
-
-  return items.map((item) => `- ${item}`).join('\n')
-}
-
-function getTechnologySignals(projectInfo: GitHubProjectInfo | null) {
-  if (!projectInfo) {
-    return []
-  }
-
-  const values = uniqueStrings([
-    ...projectInfo.projectTypes,
-    ...projectInfo.dependencies,
-    ...projectInfo.devDependencies,
-  ])
-
-  const priorityOrder = [
-    'Node.js',
-    'React',
-    'React DOM',
-    'React Native',
-    'Expo',
-    'Expo Router',
-    'Next.js',
-    'Vite',
-    'TypeScript',
-    'Express',
-    'Firebase',
-    'Supabase',
-    'Zustand',
-    'Redux',
-    'Redux Toolkit',
-    'React Router',
-    'React Router DOM',
-    'dotenv',
-    'cors',
-  ]
-
-  const lowerValues = new Set(values.map((value) => value.toLowerCase()))
-
-  return priorityOrder.filter((item) => lowerValues.has(item.toLowerCase()))
-}
-
-function inferPlatform(projectInfo: GitHubProjectInfo | null, repositorySummary: GitHubRepositorySummary | null) {
-  const projectTypes = uniqueStrings([
-    ...(projectInfo?.projectTypes ?? []),
-    repositorySummary?.projectType ?? '',
-  ]).map((value) => value.toLowerCase())
-
-  const has = (...items: string[]) => items.some((item) => projectTypes.includes(item.toLowerCase()))
-
-  if (has('react native') || has('expo') || has('expo router')) {
-    return 'Mobile application'
-  }
-
-  if (has('next.js')) {
-    return 'Web application with Next.js'
-  }
-
-  if (has('react') || has('vite')) {
-    return 'Web application'
-  }
-
-  if (has('express')) {
-    return 'Backend service'
-  }
-
-  if (projectTypes.length > 0) {
-    return `Appears to be a ${projectTypes[0]} project`
-  }
-
-  return 'Platform is not explicit from the current evidence'
-}
-
-function inferArchitecture(projectInfo: GitHubProjectInfo | null, repositorySummary: GitHubRepositorySummary | null) {
-  const architecture = uniqueStrings([
-    ...(repositorySummary?.architecture ?? []),
-    ...(projectInfo?.projectTypes ?? []),
-  ])
-
-  if (architecture.length > 0) {
-    return architecture
-  }
-
-  return ['Architecture is not explicit from the current evidence']
-}
-
-function inferStateManagement(projectInfo: GitHubProjectInfo | null) {
-  const dependencies = new Set(
-    (projectInfo?.dependencies ?? []).map((value) => value.toLowerCase()),
-  )
-  const devDependencies = new Set(
-    (projectInfo?.devDependencies ?? []).map((value) => value.toLowerCase()),
-  )
-  const has = (...items: string[]) =>
-    items.some((item) => dependencies.has(item.toLowerCase()) || devDependencies.has(item.toLowerCase()))
-
-  if (has('zustand')) {
-    return 'Zustand'
-  }
-
-  if (has('redux', '@reduxjs/toolkit')) {
-    return 'Redux Toolkit / Redux'
-  }
-
-  if (has('mobx')) {
-    return 'MobX'
-  }
-
-  if (has('jotai')) {
-    return 'Jotai'
-  }
-
-  if (has('valtio')) {
-    return 'Valtio'
-  }
-
-  return 'State management is not explicit; use a lightweight approach that matches the detected architecture'
-}
-
-function inferNavigation(projectInfo: GitHubProjectInfo | null, repositorySummary: GitHubRepositorySummary | null) {
-  const dependencies = new Set(
-    [
-      ...(projectInfo?.dependencies ?? []),
-      ...(projectInfo?.devDependencies ?? []),
-      ...(repositorySummary?.architecture ?? []),
-    ].map((value) => value.toLowerCase()),
-  )
-  const has = (...items: string[]) => items.some((item) => dependencies.has(item.toLowerCase()))
-
-  if (has('expo-router')) {
-    return 'Expo Router / file-based routing'
-  }
-
-  if (has('react-router-dom') || has('react-router')) {
-    return 'React Router'
-  }
-
-  if (has('next.js') || has('next')) {
-    return 'Next.js routing'
-  }
-
-  if (has('navigation')) {
-    return 'Navigation appears to be handled by a dedicated navigation layer'
-  }
-
-  return 'Navigation is not explicit; infer the routing model from the file structure and screens'
-}
-
-function inferBackend(projectInfo: GitHubProjectInfo | null, repositorySummary: GitHubRepositorySummary | null) {
-  const dependencies = new Set(
-    [
-      ...(projectInfo?.dependencies ?? []),
-      ...(projectInfo?.devDependencies ?? []),
-      ...(repositorySummary?.architecture ?? []),
-    ].map((value) => value.toLowerCase()),
-  )
-  const has = (...items: string[]) => items.some((item) => dependencies.has(item.toLowerCase()))
-
-  if (has('express')) {
-    return 'Express API server'
-  }
-
-  if (has('firebase')) {
-    return 'Firebase-backed services'
-  }
-
-  if (has('@supabase/supabase-js', 'supabase')) {
-    return 'Supabase-backed services'
-  }
-
-  if (has('axios', 'fetch')) {
-    return 'Client/server communication through HTTP APIs'
-  }
-
-  return 'Backend integration is not explicit from the current evidence'
-}
-
-function collectEvidenceFiles(
-  repositorySummary: GitHubRepositorySummary | null,
-  tree: GitHubTreeResult | null,
-) {
-  const files = repositorySummary?.importantFiles ?? []
-
-  if (files.length > 0) {
-    return files.slice(0, 10)
-  }
-
-  const keywordMatches = (tree?.files ?? [])
-    .map((file) => file.path)
-    .filter((path) =>
-      /auth|login|signup|sign-in|sign-up|profile|user|payment|billing|admin|firebase|supabase|api|service|config/i.test(
-        path,
-      ),
-    )
-
-  return keywordMatches.slice(0, 10)
-}
-
-function collectLikelyFeatures(
-  projectInfo: GitHubProjectInfo | null,
-  repositorySummary: GitHubRepositorySummary | null,
-  tree: GitHubTreeResult | null,
-) {
-  const features = uniqueStrings(repositorySummary?.keyFeatures ?? [])
-
-  if (features.length > 0) {
-    return features
-  }
-
-  const paths = (tree?.files ?? []).map((file) => file.path.toLowerCase())
-  const matches: string[] = []
-  const add = (value: string) => {
-    if (!matches.includes(value)) {
-      matches.push(value)
-    }
-  }
-
-  if (paths.some((path) => /auth|login|signup|sign-in|sign-up/.test(path))) {
-    add('Authentication flow')
-  }
-
-  if (paths.some((path) => /profile|user/.test(path))) {
-    add('User profile or account management')
-  }
-
-  if (paths.some((path) => /payment|billing|checkout/.test(path))) {
-    add('Payments or billing flow')
-  }
-
-  if (paths.some((path) => /admin/.test(path))) {
-    add('Admin tools or protected access')
-  }
-
-  if (paths.some((path) => /api|service/.test(path))) {
-    add('API or service layer')
-  }
-
-  if (paths.some((path) => /settings|preferences/.test(path))) {
-    add('Settings or preferences screens')
-  }
-
-  if (paths.some((path) => /firebase/.test(path))) {
-    add('Firebase integration')
-  }
-
-  if (paths.some((path) => /supabase/.test(path))) {
-    add('Supabase integration')
-  }
-
-  if (projectInfo?.projectTypes.some((type) => type.toLowerCase() === 'react native')) {
-    add('Mobile application screens')
-  }
-
-  if (projectInfo?.projectTypes.some((type) => type.toLowerCase() === 'expo router')) {
-    add('File-based screen routing')
-  }
-
-  if (matches.length === 0) {
-    add('Core application flows that are not explicit from the current evidence')
-  }
-
-  return matches
-}
-
-function collectFolderStructure(tree: GitHubTreeResult | null) {
-  if (!tree) {
-    return []
-  }
-
-  const topLevelFolders = new Set<string>()
-
-  for (const file of tree.files) {
-    const segments = file.path.split('/').filter(Boolean)
-    if (segments.length > 1) {
-      topLevelFolders.add(segments[0])
-    }
-  }
-
-  return [...topLevelFolders].slice(0, 8)
-}
-
-function buildRepositoryRebuildPrompt(context: RepositoryPromptContext) {
-  const projectType = context.repositorySummary?.projectType
-    ?? (context.projectInfo?.projectTypes.length
-      ? context.projectInfo.projectTypes.join(' / ')
-      : 'Unknown')
-  const platform = inferPlatform(context.projectInfo, context.repositorySummary)
-  const architecture = inferArchitecture(context.projectInfo, context.repositorySummary)
-  const technologies = getTechnologySignals(context.projectInfo)
-  const scripts = context.projectInfo?.scripts ?? []
-  const configFiles = context.projectInfo?.configFiles ?? []
-  const importantFiles = collectEvidenceFiles(context.repositorySummary, context.tree)
-  const features = collectLikelyFeatures(context.projectInfo, context.repositorySummary, context.tree)
-  const folderStructure = collectFolderStructure(context.tree)
-  const stateManagement = inferStateManagement(context.projectInfo)
-  const navigation = inferNavigation(context.projectInfo, context.repositorySummary)
-  const backend = inferBackend(context.projectInfo, context.repositorySummary)
-  const summaryText =
-    context.repositorySummary?.summary?.trim() ||
-    'A concise natural-language summary is not yet available, so rely on the repository signals below.'
-  const reviewPriority = context.repositorySummary?.reviewPriority ?? 'Medium'
-  const repoLabel =
-    context.repo ? `${context.repo.owner}/${context.repo.repo}` : 'the analyzed repository'
-  const evidenceFiles = importantFiles.length > 0 ? importantFiles.join(', ') : 'Not explicit from the current evidence'
-  const detectedFeatures = features.length > 0 ? features.join(', ') : 'Not explicit from the current evidence'
-  const configFilesText = configFiles.length > 0 ? configFiles.join(', ') : 'None detected'
-  const scriptsText = scripts.length > 0 ? scripts.join(', ') : 'None detected'
-  const folderText =
-    folderStructure.length > 0 ? folderStructure.join(', ') : 'Folder organization is not explicit from the current evidence'
-
-  return [
-    'You are a senior software architect and full-stack engineer.',
-    '',
-    'Analyze the repository specification below and produce a build brief for recreating a similar product from scratch.',
-    'This is a repository reconstruction prompt, not a code review prompt.',
-    'Stay strictly grounded in the repository evidence.',
-    'Do not invent unsupported technologies, features, or architecture.',
-    'When confidence is low, use wording such as appears to, likely, inferred from repository structure, or based on detected dependencies.',
-    '',
-    `Repository Target: ${repoLabel}`,
-    '',
-    'Repository Profile:',
-    `- Project Type: ${projectType}`,
-    `- Platform: ${platform}`,
-    `- Architecture: ${architecture.join(', ')}`,
-    `- Technologies: ${technologies.length > 0 ? technologies.join(', ') : 'Not explicit from the current evidence'}`,
-    `- Development Approach: ${scripts.length > 0 ? `Uses scripts such as ${scripts.slice(0, 4).join(', ')}` : 'Development workflow is not explicit from the current evidence'}`,
-    `- Folder Organization: ${folderText}`,
-    `- Backend Integration: ${backend}`,
-    `- Navigation: ${navigation}`,
-    `- State Management: ${stateManagement}`,
-    `- Review Priority: ${reviewPriority}`,
-    '',
-    'Inferred Product Behavior:',
-    formatBulletList(features),
-    '',
-    'Important Files and Responsibilities:',
-    formatBulletList(importantFiles),
-    '',
-    'Evidence Notes:',
-    `- Config Files: ${configFilesText}`,
-    `- Scripts: ${scriptsText}`,
-    `- Repository Summary: ${summaryText}`,
-    `- Evidence Files: ${evidenceFiles}`,
-    `- Detected Signals: ${detectedFeatures}`,
-    '',
-    'Objective:',
-    '- Recreate the same user-facing flows, architecture, and developer workflow observed in the repository.',
-    '- Preserve the detected stack choices wherever the repository provides evidence.',
-    '- Use cautious language for uncertain areas and avoid unsupported assumptions.',
-    '- Keep the rebuilt product aligned with the repository signals instead of adding unrelated scope.',
-    '',
-    'Build Brief:',
-    '1. Architecture',
-    '   Describe the overall system architecture and implement it with the same high-level shape as the repository.',
-    '2. Core Features',
-    '   Implement the major product flows inferred from the repository and keep them aligned with the observed file organization.',
-    '3. State Management',
-    '   Use the detected state-management approach when evidence exists; otherwise choose a lightweight equivalent that fits the app architecture.',
-    '4. Navigation',
-    '   Implement the detected routing or navigation approach; if it is not explicit, infer it from the screens and folder structure.',
-    '5. Backend Integration',
-    '   Implement the detected backend or API integration approach and keep UI/service boundaries clean.',
-    '6. Security',
-    '   Follow production-grade security practices appropriate for the detected application type.',
-    '7. Code Quality',
-    '   Use maintainable architecture, clear separation of concerns, and modular components or services.',
-    '8. Folder Structure',
-    '   Create a scalable folder structure appropriate for the detected project type and repository organization.',
-    '9. Development Phases',
-    '   Provide a phased implementation plan that starts with the foundation and expands toward higher-value features.',
-    '10. Final Deliverable',
-    '    Produce a working MVP that mirrors the repository\'s core behavior, followed by recommended future improvements.',
-    '',
-    'Style Guidance:',
-    '- Write like a product-focused implementation brief for an AI coding assistant.',
-    '- Be specific, practical, and concise.',
-    '- Prefer clear section headings and direct instructions.',
-    '- Keep the brief copy-paste ready for ChatGPT, Claude, Grok, Gemini, Codex, Cursor, Windsurf, or similar tools.',
-  ].join('\n')
-}
-
 function App() {
   const [mode, setMode] = useState<Mode>('code')
   const [code, setCode] = useState('')
@@ -562,8 +165,6 @@ function App() {
     useState<GitHubRepositorySummary | null>(null)
   const [githubRepositorySummaryLoading, setGitHubRepositorySummaryLoading] = useState(false)
   const [githubRepositorySummaryError, setGitHubRepositorySummaryError] = useState('')
-  const [repositoryRebuildPrompt, setRepositoryRebuildPrompt] = useState('')
-  const [repositoryRebuildPromptCopyStatus, setRepositoryRebuildPromptCopyStatus] = useState('')
   const [selectedGitHubFiles, setSelectedGitHubFiles] = useState<string[]>([])
   const [multiFileReview, setMultiFileReview] = useState<GitHubMultiFileReview | null>(null)
   const [multiFileReviewLoading, setMultiFileReviewLoading] = useState(false)
@@ -573,17 +174,6 @@ function App() {
   )
   const [githubFileLoading, setGithubFileLoading] = useState(false)
   const [githubFileError, setGithubFileError] = useState('')
-
-  const repositoryRebuildPromptDraft = useMemo(
-    () =>
-      buildRepositoryRebuildPrompt({
-        repo: githubResult,
-        projectInfo: githubProjectInfo,
-        repositorySummary: githubRepositorySummary,
-        tree: githubTree,
-      }),
-    [githubResult, githubProjectInfo, githubRepositorySummary, githubTree],
-  )
 
   const cards = useMemo(
     () => [
@@ -634,17 +224,6 @@ function App() {
       // Ignore storage failures in private mode or full storage scenarios.
     }
   }, [history])
-
-  useEffect(() => {
-    if (!githubResult) {
-      setRepositoryRebuildPrompt('')
-      setRepositoryRebuildPromptCopyStatus('')
-      return
-    }
-
-    setRepositoryRebuildPrompt(repositoryRebuildPromptDraft)
-    setRepositoryRebuildPromptCopyStatus('')
-  }, [githubResult, repositoryRebuildPromptDraft])
 
   const updateHistory = (nextItem: ReviewHistoryItem) => {
     setHistory((currentHistory) => [nextItem, ...currentHistory].slice(0, 5))
@@ -752,8 +331,6 @@ function App() {
     setGitHubProjectInfoError('')
     setGitHubRepositorySummary(null)
     setGitHubRepositorySummaryError('')
-    setRepositoryRebuildPrompt('')
-    setRepositoryRebuildPromptCopyStatus('')
     setSelectedGitHubFiles([])
     setMultiFileReview(null)
     setMultiFileReviewError('')
@@ -850,28 +427,6 @@ function App() {
       setGitHubRepositorySummary(null)
     } finally {
       setGitHubRepositorySummaryLoading(false)
-    }
-  }
-
-  const handleGenerateRebuildPrompt = () => {
-    if (!githubResult) {
-      return
-    }
-
-    setRepositoryRebuildPrompt(repositoryRebuildPromptDraft)
-    setRepositoryRebuildPromptCopyStatus('')
-  }
-
-  const handleCopyRebuildPrompt = async () => {
-    if (!repositoryRebuildPrompt) {
-      return
-    }
-
-    try {
-      await navigator.clipboard.writeText(repositoryRebuildPrompt)
-      setRepositoryRebuildPromptCopyStatus('Prompt copied.')
-    } catch {
-      setRepositoryRebuildPromptCopyStatus('Unable to copy prompt right now.')
     }
   }
 
@@ -999,8 +554,6 @@ function App() {
     setGitHubProjectInfoError('')
     setGitHubRepositorySummary(null)
     setGitHubRepositorySummaryError('')
-    setRepositoryRebuildPrompt('')
-    setRepositoryRebuildPromptCopyStatus('')
     setSelectedGitHubFiles([])
     setMultiFileReview(null)
     setMultiFileReviewError('')
@@ -1286,49 +839,6 @@ function App() {
                 <span className="project-summary-group__label">Summary</span>
                 <p className="project-summary-text">{githubRepositorySummary.summary}</p>
               </div>
-            </section>
-          ) : null}
-
-          {githubResult ? (
-            <section className="rebuild-prompt-card" aria-label="Repository rebuild prompt">
-              <div className="rebuild-prompt-card__header">
-                <div>
-                  <h3>Repository Rebuild Prompt</h3>
-                  <p>Copy this prompt into another AI tool to recreate a similar application.</p>
-                </div>
-
-                <div className="rebuild-prompt-actions">
-                  <button
-                    type="button"
-                    className="review-button"
-                    onClick={handleGenerateRebuildPrompt}
-                  >
-                    Generate Rebuild Prompt
-                  </button>
-                  <button
-                    type="button"
-                    className="secondary-button"
-                    onClick={handleCopyRebuildPrompt}
-                    disabled={!repositoryRebuildPrompt}
-                  >
-                    Copy Prompt
-                  </button>
-                </div>
-              </div>
-
-              {repositoryRebuildPromptCopyStatus ? (
-                <div className="status status--copy" aria-live="polite">
-                  {repositoryRebuildPromptCopyStatus}
-                </div>
-              ) : null}
-
-              <textarea
-                className="rebuild-prompt-textarea"
-                value={repositoryRebuildPrompt}
-                placeholder="Click Generate Rebuild Prompt to build a copy-paste ready system reconstruction prompt from the repository analysis."
-                readOnly
-                rows={22}
-              />
             </section>
           ) : null}
 
