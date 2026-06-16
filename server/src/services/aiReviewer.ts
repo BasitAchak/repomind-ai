@@ -603,7 +603,10 @@ function filterUnsupportedFindings(reviewRequest: ReviewRequest, review: ReviewR
       return false
     }
 
-    if (!reactEvidence && /\breact\b|hook|component|state management|usestate|useeffect|props?\b|jsx|tsx/.test(lowerItem)) {
+    if (
+      !reactEvidence &&
+      /\breact\b|hook|component|\bstate\b|state management|usestate|useeffect|props?\b|jsx|tsx/.test(lowerItem)
+    ) {
       return false
     }
 
@@ -678,6 +681,7 @@ function parseReviewJson(rawContent: string) {
 async function callGroqOnce(
   reviewRequest: ReviewRequest,
   model: string,
+  prompt: string,
 ): Promise<ReviewResult> {
   const apiKey = getGroqApiKey()
 
@@ -701,7 +705,7 @@ async function callGroqOnce(
         },
         {
           role: 'user',
-          content: buildPrompt(reviewRequest),
+          content: prompt,
         },
       ],
       response_format: {
@@ -730,10 +734,6 @@ async function callGroqOnce(
   }
 
   try {
-    console.error('[RepoMind AI] Groq raw output:', {
-      model,
-      rawContent,
-    })
     return parseReviewJson(rawContent)
   } catch (error) {
     console.error('[RepoMind AI] Groq response parsing failed:', {
@@ -756,11 +756,12 @@ async function callGroq(reviewRequest: ReviewRequest): Promise<ReviewResult> {
     return analyzeCodeHeuristics(reviewRequest)
   }
 
+  const prompt = buildPrompt(reviewRequest)
   let lastError: Error | null = null
 
   for (const model of groqModels) {
     try {
-      return await callGroqOnce(reviewRequest, model)
+      return await callGroqOnce(reviewRequest, model, prompt)
     } catch (error) {
       if (error instanceof ReviewError && error.message.startsWith('Groq request failed')) {
         lastError = error

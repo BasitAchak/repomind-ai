@@ -337,6 +337,7 @@ function App() {
     setMultiFileReviewError('')
     setSelectedGitHubFile(null)
     setGithubFileError('')
+    setResult(null)
 
     if (!githubUrl.trim()) {
       setGithubError('Please enter a GitHub repository URL.')
@@ -560,6 +561,7 @@ function App() {
     setMultiFileReviewError('')
     setGithubFileError('')
     setCopyStatus('')
+    setResult(null)
   }
 
   const handleReviewSelectedFile = async () => {
