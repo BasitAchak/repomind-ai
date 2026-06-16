@@ -124,8 +124,9 @@ function buildReviewGuidance(reviewRequest: ReviewRequest) {
     'Use "securityIssues" only for real security risks.',
     'Use "codeQuality" for concrete maintainability, readability, architecture, type-safety, and configuration concerns grounded in the file.',
     'Use "improvements" for optional but useful refactors, UX, and structural enhancements grounded in the file.',
-    'When the code is React, React Native, or TypeScript, look for large components, too many responsibilities in one file, repeated state-reset logic, weak error handling, password/auth UX concerns, missing loading states, missing disabled states, unsafe any usage, duplicated UI patterns, and extractable hooks/components.',
-    'If there are no actual bugs, bugs can be empty.',
+    'When the code is React, React Native, or TypeScript, look for large components, too many responsibilities in one file, repeated state-reset logic, weak error handling, password/auth UX concerns, missing loading states, missing disabled states, unsafe any usage, duplicated UI patterns, extractable hooks/components, stale state, broken conditional logic, and cleanup bugs.',
+    'If obvious runtime, logic, or state-flow defects exist, put them in bugs even if the file also has maintainability issues.',
+    'Only leave bugs empty when there are truly no correctness problems in the provided code.',
     'If there are no real security risks, securityIssues can be empty.',
     'But do not leave codeQuality or improvements empty unless the file is genuinely very clean and there are no grounded maintainability, readability, architecture, UX, or type-safety observations to make.',
     'Each non-empty finding must cite a specific code pattern from the provided file, such as a function, branch, prop, state flow, repeated block, or component structure.',
@@ -204,6 +205,62 @@ function normalizeReviewResult(value: unknown): ReviewResult | null {
     securityIssues: toStringArray(candidate.securityIssues),
     codeQuality: toStringArray(candidate.codeQuality),
     improvements: toStringArray(candidate.improvements),
+  }
+}
+
+function uniqueStrings(values: string[]) {
+  return [...new Set(values.map((value) => value.trim()).filter(Boolean))]
+}
+
+function detectObviousBugFindings(reviewRequest: ReviewRequest) {
+  const findings: string[] = []
+  const code = reviewRequest.code
+  const language = reviewRequest.language.toLowerCase()
+  const isTypeScriptLike =
+    language.includes('typescript') || language.includes('javascript') || /\.(ts|tsx|js|jsx)$/i.test(reviewRequest.filePath ?? '')
+  const normalizedCode = code.replace(/\r\n/g, '\n')
+
+  const add = (value: string) => {
+    if (!findings.includes(value)) {
+      findings.push(value)
+    }
+  }
+
+  if (isTypeScriptLike && /\bany\b/.test(normalizedCode)) {
+    add('Unsafe `any` usage can hide type errors and let runtime bugs slip through.')
+  }
+
+  if (/catch\s*\(\s*[^)]*\s*\)\s*\{\s*\}/s.test(normalizedCode) || /catch\s*\{\s*\}/s.test(normalizedCode)) {
+    add('Empty `catch` blocks swallow failures and can hide broken async or state-update flows.')
+  }
+
+  if (/setInterval\s*\(/.test(normalizedCode) && /useEffect\s*\(/.test(normalizedCode) && !/clearInterval\s*\(/.test(normalizedCode)) {
+    add('`setInterval` is created without cleanup, so the timer can leak when the component unmounts.')
+  }
+
+  if (/addEventListener\s*\(/.test(normalizedCode) && /useEffect\s*\(/.test(normalizedCode) && !/removeEventListener\s*\(/.test(normalizedCode)) {
+    add('Event listeners are registered without cleanup, which can create duplicate handlers or leaks.')
+  }
+
+  if (/fetch\s*\(/.test(normalizedCode) && !/response\.ok/.test(normalizedCode) && !/status/.test(normalizedCode)) {
+    add('`fetch` calls do not check the HTTP status, so failed requests may be treated as successful responses.')
+  }
+
+  if (/(^|[^=!])==([^=]|$)/.test(normalizedCode) || /(^|[^=!])!=([^=]|$)/.test(normalizedCode)) {
+    add('Loose equality can cause coercion bugs and unexpected branching.')
+  }
+
+  return findings.slice(0, 3)
+}
+
+function mergeReviewWithHeuristics(reviewRequest: ReviewRequest, review: ReviewResult): ReviewResult {
+  const bugFindings = uniqueStrings([...detectObviousBugFindings(reviewRequest), ...review.bugs])
+
+  return {
+    bugs: bugFindings,
+    securityIssues: uniqueStrings(review.securityIssues),
+    codeQuality: uniqueStrings(review.codeQuality),
+    improvements: uniqueStrings(review.improvements),
   }
 }
 
@@ -322,7 +379,7 @@ async function callGroq(reviewRequest: ReviewRequest): Promise<ReviewResult> {
   const apiKey = getGroqApiKey()
 
   if (!apiKey) {
-    return getMockReview()
+    return mergeReviewWithHeuristics(reviewRequest, getMockReview())
   }
 
   let lastError: Error | null = null
@@ -344,5 +401,6 @@ async function callGroq(reviewRequest: ReviewRequest): Promise<ReviewResult> {
 }
 
 export async function reviewCode(reviewRequest: ReviewRequest): Promise<ReviewResult> {
-  return callGroq(reviewRequest)
+  const review = await callGroq(reviewRequest)
+  return mergeReviewWithHeuristics(reviewRequest, review)
 }
