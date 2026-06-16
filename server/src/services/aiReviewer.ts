@@ -22,6 +22,8 @@ type GroqChatResponse = {
   }>
 }
 
+type ReviewLanguage = 'python' | 'javascript' | 'typescript' | 'react' | 'json' | 'java' | 'text'
+
 const mockReview: ReviewResult = {
   bugs: [],
   securityIssues: [],
@@ -100,45 +102,145 @@ function isConfigFile(filePath?: string) {
   )
 }
 
+function detectLanguageFromExtension(filePath?: string): ReviewLanguage | null {
+  const normalized = filePath?.toLowerCase() ?? ''
+
+  if (normalized.endsWith('.py') || normalized.endsWith('.pyw')) {
+    return 'python'
+  }
+
+  if (normalized.endsWith('.tsx') || normalized.endsWith('.jsx')) {
+    return 'react'
+  }
+
+  if (normalized.endsWith('.ts')) {
+    return 'typescript'
+  }
+
+  if (normalized.endsWith('.js')) {
+    return 'javascript'
+  }
+
+  if (normalized.endsWith('.json') || isConfigFile(filePath)) {
+    return 'json'
+  }
+
+  if (normalized.endsWith('.java')) {
+    return 'java'
+  }
+
+  return null
+}
+
+function detectLanguageFromCode(code: string): ReviewLanguage | null {
+  if (/^\s*(import\s+os|import\s+sqlite3|def\s+\w+\(|from\s+\w+\s+import\s+)/m.test(code)) {
+    return 'python'
+  }
+
+  if (/^\s*[{[]/.test(code.trim())) {
+    try {
+      JSON.parse(code)
+      return 'json'
+    } catch {
+      // Continue with non-JSON detection.
+    }
+  }
+
+  if (/useState\s*\(|useEffect\s*\(|<[A-Z_a-z][^>]*>|from\s+['"]react['"]/.test(code)) {
+    return 'react'
+  }
+
+  if (/\binterface\s+\w+|\btype\s+\w+\s*=|:\s*(string|number|boolean|unknown|any)\b/.test(code)) {
+    return 'typescript'
+  }
+
+  if (/\bfunction\s+\w+\s*\(|const\s+\w+\s*=|let\s+\w+\s*=|=>/.test(code)) {
+    return 'javascript'
+  }
+
+  if (/public\s+class\s+\w+|public\s+static\s+void\s+main/.test(code)) {
+    return 'java'
+  }
+
+  return null
+}
+
+function detectReviewLanguage(reviewRequest: ReviewRequest): ReviewLanguage {
+  const requestedLanguage = reviewRequest.language.toLowerCase()
+  const extensionLanguage = detectLanguageFromExtension(reviewRequest.filePath)
+  const codeLanguage = detectLanguageFromCode(reviewRequest.code)
+
+  if (extensionLanguage) {
+    return extensionLanguage
+  }
+
+  if (codeLanguage) {
+    return codeLanguage
+  }
+
+  if (requestedLanguage.includes('python')) {
+    return 'python'
+  }
+
+  if (requestedLanguage.includes('react')) {
+    return 'react'
+  }
+
+  if (requestedLanguage.includes('typescript')) {
+    return 'typescript'
+  }
+
+  if (requestedLanguage.includes('javascript')) {
+    return 'javascript'
+  }
+
+  if (requestedLanguage.includes('json')) {
+    return 'json'
+  }
+
+  if (requestedLanguage.includes('java')) {
+    return 'java'
+  }
+
+  return 'text'
+}
+
 function buildReviewGuidance(reviewRequest: ReviewRequest) {
   const filePath = reviewRequest.filePath?.trim()
   const language = reviewRequest.language.trim()
-  const configReview = language.toLowerCase() === 'json' || isConfigFile(filePath)
-  const normalizedFilePath = filePath?.toLowerCase() ?? ''
-  const isReactOrTsxFile =
-    language.toLowerCase().includes('react') ||
-    language.toLowerCase().includes('typescript') ||
-    normalizedFilePath.endsWith('.tsx') ||
-    normalizedFilePath.endsWith('.jsx') ||
-    normalizedFilePath.includes('component') ||
-    normalizedFilePath.includes('screen') ||
-    normalizedFilePath.includes('page')
+  const detectedLanguage = detectReviewLanguage(reviewRequest)
+  const configReview = detectedLanguage === 'json' || isConfigFile(filePath)
 
   const lines = [
     'You are RepoMind AI, a strict but careful senior code reviewer.',
+    'Review only the code in this request. Do not use repository summaries, previous reviews, previous files, or outside context.',
     'Review only what is present in the provided content.',
     'Do not invent issues.',
     'Do not say something is missing if it already exists.',
     'Do not stop after finding one issue.',
     'Find multiple independent issues when they exist.',
     'For intentionally buggy code, report all major problems.',
+    'Return empty arrays for categories with no grounded findings.',
     'Do not label minor suggestions as bugs.',
     'Use "bugs" for runtime failures, correctness issues, broken logic, division by zero, null/undefined mistakes, bad control flow, and other behavior that can fail at runtime.',
     'Use "securityIssues" for exploitable or sensitive-data risks, including hardcoded secrets, SQL injection, command injection, path traversal, shell=True risks, unsafe eval/exec, unsafe deserialization, insecure password handling, plaintext password comparison/storage, and weak authentication/authorization logic.',
     'Use "codeQuality" for maintainability, readability, architecture, type-safety, and reliability concerns grounded in the file.',
     'Use "improvements" for concrete fixes and refactors that directly address the findings.',
-    'When the code is React, React Native, or TypeScript, look for large components, too many responsibilities in one file, repeated state-reset logic, weak error handling, password/auth UX concerns, missing loading states, missing disabled states, unsafe any usage, duplicated UI patterns, extractable hooks/components, stale state, broken conditional logic, and cleanup bugs.',
-    'When the code is Python, specifically inspect sqlite query construction, os.system, subprocess with shell=True, hardcoded secrets, missing context managers, exception handling, zero division, missing input validation, and unsafe file/path handling.',
+    'Never mention React, hooks, components, state management, or UX unless React evidence exists in the provided code or file extension.',
+    'Never mention TypeScript `any` unless the token `any` exists in the provided code.',
+    'Never mention SQL injection unless SQL or query construction exists.',
+    'Never mention command injection unless shell, os.system, subprocess, child_process, exec, spawn, or similar command execution exists.',
+    'Never mention hardcoded secrets unless secret-like values, keys, passwords, tokens, or credentials exist.',
     'If obvious runtime, logic, or state-flow defects exist, put them in bugs even if the file also has maintainability issues.',
     'Only leave bugs empty when there are truly no correctness problems in the provided code.',
     'If there are no real security risks, securityIssues can be empty.',
-    'But do not leave codeQuality or improvements empty unless the file is genuinely very clean and there are no grounded maintainability, readability, architecture, UX, or type-safety observations to make.',
     'Each non-empty finding must cite a specific code pattern from the provided file, such as a function, branch, prop, state flow, repeated block, or component structure.',
     'Keep every issue specific, grounded, and concise.',
     'Aim for up to 6 items per category, but return fewer if the evidence supports fewer.',
     'Return JSON only with this exact shape:',
     '{"bugs":[],"securityIssues":[],"codeQuality":[],"improvements":[]}',
-    `Language: ${language}`,
+    `User selected language: ${language}`,
+    `Detected review language: ${detectedLanguage}`,
   ]
 
   if (filePath) {
@@ -148,7 +250,7 @@ function buildReviewGuidance(reviewRequest: ReviewRequest) {
   if (configReview) {
     lines.push(
       'Treat this as configuration, not executable code.',
-      'For Expo app.json or similar config files, focus on:',
+      'For JSON/config files, focus only on configuration correctness and security settings:',
       '- invalid JSON',
       '- missing production metadata',
       '- risky permissions or settings',
@@ -159,7 +261,19 @@ function buildReviewGuidance(reviewRequest: ReviewRequest) {
     )
   }
 
-  if (isReactOrTsxFile) {
+  if (detectedLanguage === 'python') {
+    lines.push(
+      'For Python, specifically inspect sqlite query construction, os.system, subprocess with shell=True, hardcoded secrets, missing context managers, exception handling, zero division, missing input validation, and unsafe file/path handling.',
+    )
+  }
+
+  if (detectedLanguage === 'javascript' || detectedLanguage === 'typescript') {
+    lines.push(
+      'For JavaScript/TypeScript, inspect type safety, async handling, null/undefined handling, injection risks, and error handling.',
+    )
+  }
+
+  if (detectedLanguage === 'react') {
     lines.push(
       'For React/React Native/TypeScript UI files, prefer grounded feedback about component size, duplicated UI patterns, prop drilling, repeated handlers, state management, missing loading or disabled states, and opportunities to extract reusable hooks or components.',
     )
@@ -221,6 +335,31 @@ function limitReviewItems(items: string[], limit = 6) {
   return uniqueStrings(items).slice(0, limit)
 }
 
+function hasReactEvidence(code: string, filePath?: string) {
+  const normalizedFilePath = filePath?.toLowerCase() ?? ''
+
+  return (
+    normalizedFilePath.endsWith('.tsx') ||
+    normalizedFilePath.endsWith('.jsx') ||
+    /from\s+['"]react['"]|useState\s*\(|useEffect\s*\(|<[A-Z_a-z][^>]*>/.test(code)
+  )
+}
+
+function hasSqlEvidence(code: string) {
+  return /\b(select|insert|update|delete|drop|alter)\b|sqlite3|cursor\.execute|query\s*=/i.test(code)
+}
+
+function hasCommandExecutionEvidence(code: string) {
+  return /os\.system|subprocess\.|shell\s*=\s*True|child_process|exec\s*\(|spawn\s*\(|system\s*\(/i.test(code)
+}
+
+function hasSecretEvidence(code: string) {
+  return (
+    /(api[_-]?key|secret|token|password|credential)\s*=\s*["'`][^"'`]{6,}["'`]/i.test(code) ||
+    /\b(sk|ghp|github_pat|xoxb|AKIA)[A-Za-z0-9_\-]{8,}\b/.test(code)
+  )
+}
+
 function analyzeCodeHeuristics(reviewRequest: ReviewRequest): ReviewResult {
   const bugs: string[] = []
   const securityIssues: string[] = []
@@ -230,21 +369,40 @@ function analyzeCodeHeuristics(reviewRequest: ReviewRequest): ReviewResult {
   const lines = normalizedCode.split('\n')
   const language = reviewRequest.language.toLowerCase()
   const filePath = reviewRequest.filePath?.toLowerCase() ?? ''
+  const detectedLanguage = detectReviewLanguage(reviewRequest)
   const isPythonFile =
-    language.includes('python') || filePath.endsWith('.py') || filePath.endsWith('.pyw')
+    detectedLanguage === 'python'
+  const isJsonOrConfigFile =
+    detectedLanguage === 'json' || isConfigFile(filePath)
   const isTypeScriptLike =
-    language.includes('typescript') ||
-    language.includes('javascript') ||
-    /\.(ts|tsx|js|jsx)$/i.test(filePath)
+    detectedLanguage === 'typescript' || detectedLanguage === 'react'
   const isReactFile =
-    language.includes('react') ||
-    filePath.endsWith('.tsx') ||
-    filePath.endsWith('.jsx') ||
-    /useState\s*\(|useEffect\s*\(|return\s*\(/.test(normalizedCode)
+    detectedLanguage === 'react' && hasReactEvidence(normalizedCode, filePath)
 
   const addUnique = (bucket: string[], value: string) => {
     if (!bucket.includes(value)) {
       bucket.push(value)
+    }
+  }
+
+  if (isJsonOrConfigFile) {
+    try {
+      JSON.parse(normalizedCode)
+    } catch {
+      addUnique(bugs, 'The JSON/config content is invalid and cannot be parsed reliably.')
+      addUnique(improvements, 'Fix the JSON syntax before using this configuration.')
+    }
+
+    if (hasSecretEvidence(normalizedCode)) {
+      addUnique(securityIssues, 'The config appears to contain a secret-like value that should not be committed.')
+      addUnique(improvements, 'Move secrets out of config files and into environment variables or a secrets manager.')
+    }
+
+    return {
+      bugs: limitReviewItems(bugs),
+      securityIssues: limitReviewItems(securityIssues),
+      codeQuality: [],
+      improvements: limitReviewItems(improvements),
     }
   }
 
@@ -257,7 +415,7 @@ function analyzeCodeHeuristics(reviewRequest: ReviewRequest): ReviewResult {
     addUnique(codeQuality, 'Type safety is weakened by `any`, which makes runtime regressions easier to miss.')
   }
 
-  if (/as\s+any\b/.test(normalizedCode) || /\/\/\s*@ts-ignore/.test(normalizedCode)) {
+  if (isTypeScriptLike && (/as\s+any\b/.test(normalizedCode) || /\/\/\s*@ts-ignore/.test(normalizedCode))) {
     addUnique(codeQuality, 'Type assertions or ignores are suppressing the compiler instead of fixing the underlying type issue.')
   }
 
@@ -268,6 +426,7 @@ function analyzeCodeHeuristics(reviewRequest: ReviewRequest): ReviewResult {
   }
 
   if (
+    hasSecretEvidence(normalizedCode) ||
     /password\s*=\s*["'`][^"'`]{4,}["'`]/i.test(normalizedCode) ||
     /const\s+\w*password\w*\s*=\s*["'`][^"'`]{4,}["'`]/i.test(normalizedCode) ||
     /["'`][^"'`]{4,}["'`]\s*===?\s*\w*password\w*/i.test(normalizedCode)
@@ -277,16 +436,14 @@ function analyzeCodeHeuristics(reviewRequest: ReviewRequest): ReviewResult {
     addUnique(improvements, 'Move credentials into secure authentication/session handling and store secrets outside the source code.')
   }
 
-  if (
-    isPythonFile &&
-    /API_KEY|SECRET|TOKEN|PASSWORD\s*=\s*["'`][^"'`]{6,}["'`]/.test(normalizedCode)
-  ) {
+  if (isPythonFile && hasSecretEvidence(normalizedCode)) {
     addUnique(bugs, 'A hardcoded secret or API key is stored directly in the source code.')
     addUnique(securityIssues, 'Secrets should not be embedded in code because they can leak into source control and logs.')
     addUnique(improvements, 'Load secrets from environment variables or a secrets manager instead of hardcoding them.')
   }
 
   if (
+    hasSqlEvidence(normalizedCode) &&
     /f["'].*(select|insert|update|delete|drop|alter).*{.*}.*["']/is.test(normalizedCode) ||
     /query\s*=\s*f["'][\s\S]*(select|insert|update|delete|drop|alter)[\s\S]*{[\s\S]+}/i.test(normalizedCode) ||
     /cursor\.execute\s*\(\s*query\s*\)/i.test(normalizedCode) && /\bf["']/.test(normalizedCode)
@@ -297,6 +454,7 @@ function analyzeCodeHeuristics(reviewRequest: ReviewRequest): ReviewResult {
   }
 
   if (
+    isPythonFile &&
     /sqlite3\.connect\(/i.test(normalizedCode) &&
     /cursor\.execute\(\s*query\s*\)/i.test(normalizedCode) &&
     /password/i.test(normalizedCode)
@@ -305,6 +463,7 @@ function analyzeCodeHeuristics(reviewRequest: ReviewRequest): ReviewResult {
   }
 
   if (
+    hasCommandExecutionEvidence(normalizedCode) &&
     /os\.system\s*\(/i.test(normalizedCode) ||
     /subprocess\.(call|run|popen|check_call|check_output)\s*\(/i.test(normalizedCode)
   ) {
@@ -313,12 +472,12 @@ function analyzeCodeHeuristics(reviewRequest: ReviewRequest): ReviewResult {
     addUnique(improvements, 'Use safer APIs with argument arrays and sanitize or validate all user-controlled path input.')
   }
 
-  if (/shell\s*=\s*True/i.test(normalizedCode)) {
+  if (isPythonFile && /shell\s*=\s*True/i.test(normalizedCode)) {
     addUnique(securityIssues, 'Using `shell=True` exposes the command to shell injection when any part of the command is user-controlled.')
     addUnique(bugs, 'Running subprocess commands with `shell=True` makes command injection much easier to exploit.')
   }
 
-  if (/path\s*\+\s*["'`].*|["'`].*\+\s*path/i.test(normalizedCode) && /(os\.system|subprocess\.)/i.test(normalizedCode)) {
+  if (hasCommandExecutionEvidence(normalizedCode) && /path\s*\+\s*["'`].*|["'`].*\+\s*path/i.test(normalizedCode) && /(os\.system|subprocess\.)/i.test(normalizedCode)) {
     addUnique(improvements, 'Avoid string concatenation for shell commands; pass arguments explicitly and validate file paths.')
   }
 
@@ -328,6 +487,7 @@ function analyzeCodeHeuristics(reviewRequest: ReviewRequest): ReviewResult {
   }
 
   if (
+    isPythonFile &&
     /(input|username|password|filename|path|query|filename)\s*[=,]/i.test(normalizedCode) &&
     !/if\s+.*(username|password|filename|path|query)/i.test(normalizedCode)
   ) {
@@ -350,15 +510,15 @@ function analyzeCodeHeuristics(reviewRequest: ReviewRequest): ReviewResult {
     addUnique(codeQuality, 'Authentication logic is oversimplified and likely needs a dedicated auth/session layer.')
   }
 
-  if (/setInterval\s*\(/.test(normalizedCode) && /useEffect\s*\(/.test(normalizedCode) && !/clearInterval\s*\(/.test(normalizedCode)) {
+  if ((detectedLanguage === 'javascript' || detectedLanguage === 'typescript' || isReactFile) && /setInterval\s*\(/.test(normalizedCode) && /useEffect\s*\(/.test(normalizedCode) && !/clearInterval\s*\(/.test(normalizedCode)) {
     addUnique(bugs, '`setInterval` is created without cleanup, so the timer can leak when the component unmounts.')
   }
 
-  if (/addEventListener\s*\(/.test(normalizedCode) && /useEffect\s*\(/.test(normalizedCode) && !/removeEventListener\s*\(/.test(normalizedCode)) {
+  if ((detectedLanguage === 'javascript' || detectedLanguage === 'typescript' || isReactFile) && /addEventListener\s*\(/.test(normalizedCode) && /useEffect\s*\(/.test(normalizedCode) && !/removeEventListener\s*\(/.test(normalizedCode)) {
     addUnique(bugs, 'Event listeners are registered without cleanup, which can create duplicate handlers or leaks.')
   }
 
-  if (/fetch\s*\(/.test(normalizedCode) && !/response\.ok/.test(normalizedCode) && !/status/.test(normalizedCode)) {
+  if ((detectedLanguage === 'javascript' || detectedLanguage === 'typescript' || isReactFile) && /fetch\s*\(/.test(normalizedCode) && !/response\.ok/.test(normalizedCode) && !/status/.test(normalizedCode)) {
     addUnique(bugs, '`fetch` calls do not check the HTTP status, so failed requests may be treated as successful responses.')
     addUnique(improvements, 'Check `response.ok` and surface request failures to the user.')
   }
@@ -367,15 +527,15 @@ function analyzeCodeHeuristics(reviewRequest: ReviewRequest): ReviewResult {
     addUnique(bugs, 'Loose equality can cause coercion bugs and unexpected branching.')
   }
 
-  if (/eval\s*\(|new Function\s*\(/.test(normalizedCode)) {
+  if (/eval\s*\(|new Function\s*\(|exec\s*\(/.test(normalizedCode)) {
     addUnique(securityIssues, 'Dynamic code execution can create security and maintainability risks.')
   }
 
-  if (/pickle\.loads\s*\(|yaml\.load\s*\(|json\.loads\s*\(/i.test(normalizedCode) && /request|input|payload|data/i.test(normalizedCode)) {
+  if (isPythonFile && /pickle\.loads\s*\(|yaml\.load\s*\(/i.test(normalizedCode) && /request|input|payload|data/i.test(normalizedCode)) {
     addUnique(securityIssues, 'Unsafe deserialization can execute attacker-controlled data or corrupt application state.')
   }
 
-  if (/innerHTML\s*=|dangerouslySetInnerHTML/.test(normalizedCode)) {
+  if ((detectedLanguage === 'javascript' || detectedLanguage === 'typescript' || isReactFile) && /innerHTML\s*=|dangerouslySetInnerHTML/.test(normalizedCode)) {
     addUnique(securityIssues, 'Direct HTML injection surfaces can lead to XSS if the content is not strictly trusted.')
   }
 
@@ -405,12 +565,8 @@ function analyzeCodeHeuristics(reviewRequest: ReviewRequest): ReviewResult {
     addUnique(codeQuality, 'The file contains many functions, which suggests several responsibilities are bundled together.')
   }
 
-  if (/window\.localStorage|localStorage/.test(normalizedCode) && /try\s*\{[\s\S]*localStorage[\s\S]*\}\s*catch\s*\{\s*\}/s.test(normalizedCode)) {
+  if ((detectedLanguage === 'javascript' || detectedLanguage === 'typescript' || isReactFile) && /window\.localStorage|localStorage/.test(normalizedCode) && /try\s*\{[\s\S]*localStorage[\s\S]*\}\s*catch\s*\{\s*\}/s.test(normalizedCode)) {
     addUnique(codeQuality, 'Storage errors are swallowed, which can hide persistence failures in production.')
-  }
-
-  if (bugs.length === 0 && securityIssues.length === 0 && codeQuality.length === 0 && improvements.length === 0) {
-    addUnique(codeQuality, 'No strong defects were detected automatically, so this file should still be checked manually for logic edge cases.')
   }
 
   return {
@@ -427,6 +583,58 @@ function mergeReviewResults(primary: ReviewResult, secondary: ReviewResult): Rev
     securityIssues: limitReviewItems([...primary.securityIssues, ...secondary.securityIssues]),
     codeQuality: limitReviewItems([...primary.codeQuality, ...secondary.codeQuality]),
     improvements: limitReviewItems([...primary.improvements, ...secondary.improvements]),
+  }
+}
+
+function filterUnsupportedFindings(reviewRequest: ReviewRequest, review: ReviewResult): ReviewResult {
+  const code = reviewRequest.code
+  const detectedLanguage = detectReviewLanguage(reviewRequest)
+  const reactEvidence = hasReactEvidence(code, reviewRequest.filePath)
+  const sqlEvidence = hasSqlEvidence(code)
+  const commandEvidence = hasCommandExecutionEvidence(code)
+  const secretEvidence = hasSecretEvidence(code)
+  const anyEvidence = /\bany\b/.test(code)
+  const configReview = detectedLanguage === 'json' || isConfigFile(reviewRequest.filePath)
+
+  const isSupported = (item: string) => {
+    const lowerItem = item.toLowerCase()
+
+    if (/^no\b/.test(lowerItem) || lowerItem.includes('no issues found')) {
+      return false
+    }
+
+    if (!reactEvidence && /\breact\b|hook|component|state management|usestate|useeffect|props?\b|jsx|tsx/.test(lowerItem)) {
+      return false
+    }
+
+    if (!anyEvidence && /unsafe `?any`?|type safety is weakened by `?any`?/.test(lowerItem)) {
+      return false
+    }
+
+    if (!sqlEvidence && /sql injection|sql|query|sqlite|cursor/.test(lowerItem)) {
+      return false
+    }
+
+    if (!commandEvidence && /command injection|shell=true|shell command|subprocess|os\.system|child_process|exec|spawn/.test(lowerItem)) {
+      return false
+    }
+
+    if (!secretEvidence && /hardcoded secret|hardcoded credential|api key|token|credential|password-like|secret-like/.test(lowerItem)) {
+      return false
+    }
+
+    if (configReview) {
+      return /json|config|configuration|secret|permission|metadata|asset|parse|syntax|environment|setting/.test(lowerItem)
+    }
+
+    return true
+  }
+
+  return {
+    bugs: limitReviewItems(review.bugs.filter(isSupported)),
+    securityIssues: limitReviewItems(review.securityIssues.filter(isSupported)),
+    codeQuality: limitReviewItems(review.codeQuality.filter(isSupported)),
+    improvements: limitReviewItems(review.improvements.filter(isSupported)),
   }
 }
 
@@ -569,5 +777,5 @@ async function callGroq(reviewRequest: ReviewRequest): Promise<ReviewResult> {
 export async function reviewCode(reviewRequest: ReviewRequest): Promise<ReviewResult> {
   const review = await callGroq(reviewRequest)
   const merged = mergeReviewResults(review, analyzeCodeHeuristics(reviewRequest))
-  return merged
+  return filterUnsupportedFindings(reviewRequest, merged)
 }

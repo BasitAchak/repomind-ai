@@ -239,6 +239,7 @@ function App() {
     setLoading(true)
     setLoadingMessage(message)
     setCopyStatus('')
+    setResult(null)
 
     try {
       const response = await fetch(`${API_URL}/api/review`, {
