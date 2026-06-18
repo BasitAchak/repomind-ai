@@ -1,7 +1,13 @@
 import cors from 'cors'
 import dotenv from 'dotenv'
 import express from 'express'
-import { getServerEnvPath, reviewCode, type ReviewRequest } from './services/aiReviewer'
+import {
+  getServerEnvPath,
+  reviewCodeWithMetadata,
+  type ReviewDebugMetadata,
+  type ReviewRequest,
+  type ReviewResult,
+} from './services/aiReviewer'
 import { fetchGitHubFile, GitHubFileError } from './services/githubFile'
 import { fetchGitHubProjectInfo, GitHubProjectInfoError } from './services/githubProjectInfo'
 import {
@@ -187,11 +193,17 @@ app.post('/api/review', async (request, response) => {
   }
 
   try {
-    const review = await reviewCode({
+    const execution = await reviewCodeWithMetadata({
       code,
       language,
       filePath,
     })
+
+    const review: ReviewResult & { _debug?: ReviewDebugMetadata } = execution.review
+
+    if (process.env.NODE_ENV !== 'production') {
+      review._debug = execution.debug
+    }
 
     return response.status(200).json(review)
   } catch (error) {

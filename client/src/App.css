@@ -374,6 +374,95 @@ h1 {
   color: var(--text);
 }
 
+.debug-panel {
+  margin-top: 18px;
+  border-radius: 22px;
+  border: 1px solid rgba(148, 163, 184, 0.36);
+  background: rgba(248, 250, 252, 0.88);
+  overflow: hidden;
+}
+
+.debug-panel > summary {
+  cursor: pointer;
+  list-style: none;
+  padding: 16px 18px;
+  font-weight: 700;
+  color: var(--text-h);
+  border-bottom: 1px solid rgba(148, 163, 184, 0.22);
+}
+
+.debug-panel > summary::-webkit-details-marker {
+  display: none;
+}
+
+.debug-panel__grid {
+  display: grid;
+  gap: 16px;
+  padding: 16px 18px 18px;
+}
+
+.debug-panel__section {
+  display: grid;
+  gap: 12px;
+}
+
+.debug-panel__section h3,
+.debug-panel__raw h4 {
+  margin: 0;
+  font-size: 1rem;
+  color: var(--text-h);
+}
+
+.debug-panel__list {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+}
+
+.debug-panel__list div {
+  display: grid;
+  gap: 4px;
+}
+
+.debug-panel__list dt {
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.debug-panel__list dd {
+  margin: 0;
+  color: var(--text);
+  word-break: break-word;
+}
+
+.debug-panel__previews {
+  display: grid;
+  gap: 12px;
+}
+
+.debug-panel__previews h4 {
+  margin: 0 0 8px;
+  font-size: 0.92rem;
+  color: var(--text-h);
+}
+
+.debug-panel__previews pre,
+.debug-panel__raw pre {
+  margin: 0;
+  padding: 14px;
+  border-radius: 16px;
+  background: rgba(15, 23, 42, 0.06);
+  border: 1px solid rgba(148, 163, 184, 0.32);
+  color: #0f172a;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 240px;
+  overflow: auto;
+}
+
 .history-panel {
   position: relative;
   overflow: hidden;

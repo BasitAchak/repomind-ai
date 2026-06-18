@@ -14,6 +14,22 @@ export type ReviewResult = {
   improvements: string[]
 }
 
+export type ReviewProvider = 'groq' | 'mock'
+
+export type ReviewDebugMetadata = {
+  language: string
+  filePath: string | null
+  codeLength: number
+  codePreview: string
+  provider: ReviewProvider
+  detectedLanguage: ReviewLanguage
+}
+
+export type ReviewExecutionResult = {
+  review: ReviewResult
+  debug: ReviewDebugMetadata
+}
+
 type GroqChatResponse = {
   choices?: Array<{
     message?: {
@@ -222,14 +238,14 @@ function buildReviewGuidance(reviewRequest: ReviewRequest) {
     'For intentionally buggy code, report all major problems.',
     'Return empty arrays for categories with no grounded findings.',
     'Do not label minor suggestions as bugs.',
-    'Use "bugs" for runtime failures, correctness issues, broken logic, division by zero, null/undefined mistakes, bad control flow, and other behavior that can fail at runtime.',
-    'Use "securityIssues" for exploitable or sensitive-data risks, including hardcoded secrets, SQL injection, command injection, path traversal, shell=True risks, unsafe eval/exec, unsafe deserialization, insecure password handling, plaintext password comparison/storage, and weak authentication/authorization logic.',
+    'Use "bugs" for runtime failures and correctness issues grounded in the file.',
+    'Use "securityIssues" for exploitable or sensitive-data risks grounded in the file.',
     'Use "codeQuality" for maintainability, readability, architecture, type-safety, and reliability concerns grounded in the file.',
     'Use "improvements" for concrete fixes and refactors that directly address the findings.',
     'Never mention React, hooks, components, state management, or UX unless React evidence exists in the provided code or file extension.',
     'Never mention TypeScript `any` unless the token `any` exists in the provided code.',
-    'Never mention SQL injection unless SQL or query construction exists.',
-    'Never mention command injection unless shell, os.system, subprocess, child_process, exec, spawn, or similar command execution exists.',
+    'Never mention SQL, queries, or database issues unless SQL/query/database code exists.',
+    'Never mention command execution unless shell, os.system, subprocess, child_process, exec, spawn, or similar command execution exists.',
     'Never mention hardcoded secrets unless secret-like values, keys, passwords, tokens, or credentials exist.',
     'If obvious runtime, logic, or state-flow defects exist, put them in bugs even if the file also has maintainability issues.',
     'Only leave bugs empty when there are truly no correctness problems in the provided code.',
@@ -263,19 +279,19 @@ function buildReviewGuidance(reviewRequest: ReviewRequest) {
 
   if (detectedLanguage === 'python') {
     lines.push(
-      'For Python, specifically inspect sqlite query construction, os.system, subprocess with shell=True, hardcoded secrets, missing context managers, exception handling, zero division, missing input validation, and unsafe file/path handling.',
+      'For Python, focus on runtime errors, unsafe process execution, credential handling, database access, exception handling, input validation, and file/path safety.',
     )
   }
 
   if (detectedLanguage === 'javascript' || detectedLanguage === 'typescript') {
     lines.push(
-      'For JavaScript/TypeScript, inspect type safety, async handling, null/undefined handling, injection risks, and error handling.',
+      'For JavaScript/TypeScript, focus on type safety, async handling, null/undefined handling, injection risks, and error handling.',
     )
   }
 
   if (detectedLanguage === 'react') {
     lines.push(
-      'For React/React Native/TypeScript UI files, prefer grounded feedback about component size, duplicated UI patterns, prop drilling, repeated handlers, state management, missing loading or disabled states, and opportunities to extract reusable hooks or components.',
+      'For React/React Native UI files, focus on structure, state flow, side effects, loading and error handling, and opportunities to simplify dense sections.',
     )
   }
 
@@ -360,6 +376,80 @@ function hasSecretEvidence(code: string) {
   )
 }
 
+/**
+ * Strip single-line (//) and multi-line (/* *\/) comments from code before
+ * running regex heuristics. This prevents comment text from triggering false
+ * positives (e.g. the word "any" or "auth" appearing in a comment).
+ */
+function stripComments(code: string): string {
+  // Remove block comments first, then line comments
+  return code
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/\/\/[^\n]*/g, ' ')
+}
+
+/**
+ * FIX: Check whether `any` is used as an actual TypeScript type annotation,
+ * not just as a word appearing anywhere in the file (e.g. in comments,
+ * strings, or identifiers like `cancelAllDealReminders`).
+ *
+ * Matches patterns like: `: any`, `as any`, `<any>`, `any[]`, `any,`, `any)`
+ * but NOT words like "company", "many", "cancelAll", etc.
+ */
+function hasAnyTypeUsage(code: string): boolean {
+  const stripped = stripComments(code)
+  // Remove string literals to avoid matching "any" inside strings
+  const noStrings = stripped
+    .replace(/`[^`]*`/g, '""')
+    .replace(/"[^"]*"/g, '""')
+    .replace(/'[^']*'/g, "''")
+  return /(?::\s*any\b|as\s+any\b|<any>|any\[\]|,\s*any\b|\(\s*any\b)/.test(noStrings)
+}
+
+/**
+ * FIX: Check for actual arithmetic division (e.g. `a / b`, `count / total`)
+ * rather than matching the `/` character in route strings like `/(auth)/sign-in`
+ * or regex literals.
+ *
+ * Requires both sides of `/` to be identifier-like tokens (no leading `'`, `"`,
+ * `` ` ``, `(` from a route group, or whitespace-only context).
+ */
+function hasDivisionEvidence(code: string): boolean {
+  const stripped = stripComments(code)
+  // Remove string literals first so route paths don't match
+  const noStrings = stripped
+    .replace(/`[^`]*`/g, '""')
+    .replace(/"[^"]*"/g, '""')
+    .replace(/'[^']*'/g, "''")
+  // Match identifier / identifier but not things like /(route) or */
+  return /\b[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\s*\/\s*[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\b/.test(noStrings)
+}
+
+/**
+ * FIX: Check that auth-related and password-related patterns appear in close
+ * proximity (same function body), not just anywhere in the file independently.
+ * This prevents false positives where `useAuth()` and a `password` parameter
+ * exist in unrelated parts of a well-structured file.
+ *
+ * Strategy: extract blocks that look like function bodies (~20 lines), then
+ * check if both patterns co-occur within the same block.
+ */
+function hasColocatedAuthAndPassword(code: string): boolean {
+  const stripped = stripComments(code)
+  // Split into chunks of ~20 lines and test each chunk
+  const lines = stripped.split('\n')
+  const windowSize = 20
+  for (let i = 0; i < lines.length; i += Math.floor(windowSize / 2)) {
+    const chunk = lines.slice(i, i + windowSize).join('\n')
+    const hasAuth = /(login|signin|signIn|authenticate)\s*\(/i.test(chunk)
+    const hasPassword = /\bpassword\b/i.test(chunk)
+    if (hasAuth && hasPassword) {
+      return true
+    }
+  }
+  return false
+}
+
 function analyzeCodeHeuristics(reviewRequest: ReviewRequest): ReviewResult {
   const bugs: string[] = []
   const securityIssues: string[] = []
@@ -410,7 +500,9 @@ function analyzeCodeHeuristics(reviewRequest: ReviewRequest): ReviewResult {
   const useStateMatches = normalizedCode.match(/\buseState\s*\(/g) ?? []
   const useEffectMatches = normalizedCode.match(/\buseEffect\s*\(/g) ?? []
 
-  if (isTypeScriptLike && /\bany\b/.test(normalizedCode)) {
+  // FIX: use hasAnyTypeUsage() instead of the broad /\bany\b/ regex which
+  // matched the word "any" in comments, strings, and identifiers.
+  if (isTypeScriptLike && hasAnyTypeUsage(normalizedCode)) {
     addUnique(bugs, 'Unsafe `any` usage can hide type errors and let runtime bugs slip through.')
     addUnique(codeQuality, 'Type safety is weakened by `any`, which makes runtime regressions easier to miss.')
   }
@@ -481,7 +573,17 @@ function analyzeCodeHeuristics(reviewRequest: ReviewRequest): ReviewResult {
     addUnique(improvements, 'Avoid string concatenation for shell commands; pass arguments explicitly and validate file paths.')
   }
 
-  if (/(\breturn\s+)?[A-Za-z_][\w.]*\s*\/\s*[A-Za-z_][\w.]*\b/.test(normalizedCode) && !/if\s+.*==\s*0|if\s+.*!=\s*0|if\s+.*<=\s*0/.test(normalizedCode)) {
+  // FIX: use hasDivisionEvidence() which strips comments and string literals
+  // before matching, preventing route strings like `/(auth)/sign-in` from
+  // triggering a false "division by zero" finding.
+  // Also gate to languages where arithmetic division is a real runtime concern;
+  // skip JSON/config files entirely since they never execute arithmetic.
+  if (
+    !isJsonOrConfigFile &&
+    (isPythonFile || detectedLanguage === 'javascript' || detectedLanguage === 'typescript' || isReactFile) &&
+    hasDivisionEvidence(normalizedCode) &&
+    !/if\s+.*==\s*0|if\s+.*!=\s*0|if\s+.*<=\s*0/.test(normalizedCode)
+  ) {
     addUnique(bugs, 'Division can fail with a zero denominator because there is no visible guard against zero.')
     addUnique(improvements, 'Validate the divisor before dividing and return a controlled error when it is zero.')
   }
@@ -495,7 +597,13 @@ function analyzeCodeHeuristics(reviewRequest: ReviewRequest): ReviewResult {
     addUnique(improvements, 'Validate and normalize user input before using it in database or filesystem operations.')
   }
 
-  if (/(login|signin|signIn|authenticate|auth)\s*\(/i.test(normalizedCode) && /password/i.test(normalizedCode)) {
+  // FIX: use hasColocatedAuthAndPassword() instead of two independent regex
+  // checks. The old approach matched `useAuth()` for the auth pattern and a
+  // separate `password` param elsewhere in the file, producing false positives
+  // on well-structured code like the profile screen. Now both patterns must
+  // appear within the same ~20-line window (i.e. the same function body).
+  // Also skip JSON/config files — they never contain executable auth logic.
+  if (!isJsonOrConfigFile && hasColocatedAuthAndPassword(normalizedCode)) {
     addUnique(bugs, 'The authentication flow appears to rely on plaintext password handling instead of proper auth/session logic.')
     addUnique(securityIssues, 'Passwords should not be compared or stored as plaintext in application logic or SQL strings.')
     addUnique(codeQuality, 'Authentication logic is oversimplified and likely needs a dedicated auth/session layer.')
@@ -523,7 +631,12 @@ function analyzeCodeHeuristics(reviewRequest: ReviewRequest): ReviewResult {
     addUnique(improvements, 'Check `response.ok` and surface request failures to the user.')
   }
 
-  if (/(^|[^=!])==([^=]|$)/.test(normalizedCode) || /(^|[^=!])!=([^=]|$)/.test(normalizedCode)) {
+  // Loose equality (== / !=) is only a bug pattern in JavaScript/TypeScript.
+  // Python uses == for value comparison intentionally — do not flag it there.
+  if (
+    (detectedLanguage === 'javascript' || detectedLanguage === 'typescript' || isReactFile) &&
+    (/(^|[^=!])==([^=]|$)/.test(normalizedCode) || /(^|[^=!])!=([^=]|$)/.test(normalizedCode))
+  ) {
     addUnique(bugs, 'Loose equality can cause coercion bugs and unexpected branching.')
   }
 
@@ -586,6 +699,28 @@ function mergeReviewResults(primary: ReviewResult, secondary: ReviewResult): Rev
   }
 }
 
+function isReactSpecificFinding(item: string) {
+  return /(?:\breact\b|\bhooks?\b|\bcomponents?\b|component responsibilities|state management|\buseState\b|\buseEffect\b|\bprops?\b|prop drilling|\bjsx\b|\btsx\b|\bfrontend\b|\bui\b|extract reusable hooks)/i.test(
+    item,
+  )
+}
+
+function isTypeScriptSpecificFinding(item: string) {
+  return /(?:\btypescript\b|\btsconfig\b|unsafe `?any`?|type safety|type assertions?|@ts-ignore|\bany usage\b|type safety is weakened by `?any`?|\bgenerics?\b)/i.test(
+    item,
+  )
+}
+
+function isPythonSpecificFinding(item: string) {
+  return /(?:\bpython\b|\bpythonic\b|\bpep 8\b|\bpep8\b|\bvenv\b|\bvirtualenv\b|\bpip\b|\bpytest\b|\bsqlite\b|\bsubprocess\b|os\.system|\basyncio\b|\bpickle\b|\byaml\b)/i.test(
+    item,
+  )
+}
+
+function isDivisionSpecificFinding(item: string) {
+  return /(?:division by zero|zero denominator|divide by zero|divisor|numerator|denominator)/i.test(item)
+}
+
 function filterUnsupportedFindings(reviewRequest: ReviewRequest, review: ReviewResult): ReviewResult {
   const code = reviewRequest.code
   const detectedLanguage = detectReviewLanguage(reviewRequest)
@@ -593,8 +728,13 @@ function filterUnsupportedFindings(reviewRequest: ReviewRequest, review: ReviewR
   const sqlEvidence = hasSqlEvidence(code)
   const commandEvidence = hasCommandExecutionEvidence(code)
   const secretEvidence = hasSecretEvidence(code)
-  const anyEvidence = /\bany\b/.test(code)
+  // FIX: use the precise hasAnyTypeUsage() check here too, so the filter
+  // stays consistent with the heuristic that produced the finding.
+  const anyEvidence = hasAnyTypeUsage(code)
   const configReview = detectedLanguage === 'json' || isConfigFile(reviewRequest.filePath)
+  const pythonEvidence = detectedLanguage === 'python'
+  // FIX: use hasDivisionEvidence() for consistent filtering
+  const divisionEvidence = hasDivisionEvidence(code)
 
   const isSupported = (item: string) => {
     const lowerItem = item.toLowerCase()
@@ -603,14 +743,19 @@ function filterUnsupportedFindings(reviewRequest: ReviewRequest, review: ReviewR
       return false
     }
 
-    if (
-      !reactEvidence &&
-      /\breact\b|hook|component|\bstate\b|state management|usestate|useeffect|props?\b|jsx|tsx/.test(lowerItem)
-    ) {
+    if (!reactEvidence && isReactSpecificFinding(lowerItem)) {
       return false
     }
 
-    if (!anyEvidence && /unsafe `?any`?|type safety is weakened by `?any`?/.test(lowerItem)) {
+    if (detectedLanguage !== 'typescript' && detectedLanguage !== 'react' && isTypeScriptSpecificFinding(lowerItem)) {
+      return false
+    }
+
+    if (!anyEvidence && /unsafe `?any`?|type safety is weakened by `?any`?|type safety.*any usage/i.test(lowerItem)) {
+      return false
+    }
+
+    if (!pythonEvidence && isPythonSpecificFinding(lowerItem)) {
       return false
     }
 
@@ -619,6 +764,10 @@ function filterUnsupportedFindings(reviewRequest: ReviewRequest, review: ReviewR
     }
 
     if (!commandEvidence && /command injection|shell=true|shell command|subprocess|os\.system|child_process|exec|spawn/.test(lowerItem)) {
+      return false
+    }
+
+    if (!divisionEvidence && isDivisionSpecificFinding(lowerItem)) {
       return false
     }
 
@@ -643,6 +792,20 @@ function filterUnsupportedFindings(reviewRequest: ReviewRequest, review: ReviewR
 
 function buildPrompt(reviewRequest: ReviewRequest) {
   return buildReviewGuidance(reviewRequest)
+}
+
+function buildReviewDebugMetadata(
+  reviewRequest: ReviewRequest,
+  provider: ReviewProvider,
+): ReviewDebugMetadata {
+  return {
+    language: reviewRequest.language,
+    filePath: reviewRequest.filePath ?? null,
+    codeLength: reviewRequest.code.length,
+    codePreview: reviewRequest.code.slice(0, 300),
+    provider,
+    detectedLanguage: detectReviewLanguage(reviewRequest),
+  }
 }
 
 function parseReviewJson(rawContent: string) {
@@ -749,6 +912,29 @@ async function callGroqOnce(
   }
 }
 
+/**
+ * Determines whether an error from Groq is a transient failure that is safe
+ * to retry (5xx server errors, rate limits, network issues) vs. a permanent
+ * client error (4xx bad request, invalid API key) that should not be retried.
+ */
+function isRetryableGroqError(error: unknown): boolean {
+  if (!(error instanceof ReviewError)) return false
+  // Match status codes in the error message: retry 429, 500, 502, 503, 504
+  const match = error.message.match(/status (\d{3})/)
+  if (!match) {
+    // Network-level errors (no status code) are also retryable
+    return error.message.startsWith('Groq request failed')
+  }
+  const status = parseInt(match[1], 10)
+  return status === 429 || status >= 500
+}
+
+/**
+ * Calls Groq once per model with automatic retries on transient failures.
+ * Uses exponential backoff: 500ms, 1000ms, 2000ms between attempts.
+ * Falls back to heuristics (instead of throwing) if all attempts fail, so
+ * the user always gets a review result rather than an error screen.
+ */
 async function callGroq(reviewRequest: ReviewRequest): Promise<ReviewResult> {
   const apiKey = getGroqApiKey()
 
@@ -757,26 +943,75 @@ async function callGroq(reviewRequest: ReviewRequest): Promise<ReviewResult> {
   }
 
   const prompt = buildPrompt(reviewRequest)
-  let lastError: Error | null = null
+  const MAX_RETRIES = 3
+  const BASE_DELAY_MS = 500
 
   for (const model of groqModels) {
-    try {
-      return await callGroqOnce(reviewRequest, model, prompt)
-    } catch (error) {
-      if (error instanceof ReviewError && error.message.startsWith('Groq request failed')) {
-        lastError = error
-        continue
-      }
+    let lastError: Error | null = null
 
-      throw error
+    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+      try {
+        return await callGroqOnce(reviewRequest, model, prompt)
+      } catch (error) {
+        if (isRetryableGroqError(error)) {
+          lastError = error instanceof Error ? error : new ReviewError(String(error))
+          // Exponential backoff: 500ms, 1000ms, 2000ms
+          const delay = BASE_DELAY_MS * Math.pow(2, attempt)
+          await new Promise((resolve) => setTimeout(resolve, delay))
+          continue
+        }
+        // Non-retryable error (e.g. 400 bad request, parse failure): break
+        // out of the retry loop and try the next model
+        lastError = error instanceof Error ? error : new ReviewError(String(error))
+        break
+      }
     }
+
+    // Log the failure for this model and try the next one
+    console.error(`[RepoMind AI] Model ${model} failed after ${MAX_RETRIES} attempts:`, lastError?.message)
   }
 
-  throw lastError ?? new ReviewError('Groq review failed.')
+  // All models exhausted — fall back to heuristics so the user still gets a
+  // result instead of an error screen. This is the key fix: previously this
+  // threw an error which the server caught and returned as a 502, causing the
+  // client to show nothing and requiring the user to click again manually.
+  console.warn('[RepoMind AI] All Groq models failed. Falling back to heuristic analysis.')
+  return analyzeCodeHeuristics(reviewRequest)
 }
 
 export async function reviewCode(reviewRequest: ReviewRequest): Promise<ReviewResult> {
+  const execution = await reviewCodeWithMetadata(reviewRequest)
+  return execution.review
+}
+
+export async function reviewCodeWithMetadata(
+  reviewRequest: ReviewRequest,
+): Promise<ReviewExecutionResult> {
+  const apiKey = getGroqApiKey()
   const review = await callGroq(reviewRequest)
-  const merged = mergeReviewResults(review, analyzeCodeHeuristics(reviewRequest))
-  return filterUnsupportedFindings(reviewRequest, merged)
+  const hasFilePath = typeof reviewRequest.filePath === 'string' && reviewRequest.filePath.trim().length > 0
+
+  // Pasted code does not carry a repository path, so the model gets less
+  // context than a GitHub file review. Keep a heuristic assist for that case to
+  // avoid empty-looking results when Groq is overly conservative.
+  //
+  // For repo-file reviews we still avoid merging heuristics when Groq is
+  // available, so the existing GitHub flow stays grounded and less noisy.
+  //
+  // FIX: When there is no API key, callGroq() already returns analyzeCodeHeuristics()
+  // directly. Merging heuristics again here doubled up every finding, producing
+  // noisy and inflated results. Only merge the heuristic boost when Groq actually
+  // ran (apiKey is present) AND the review is for pasted code (no filePath).
+  const shouldMergeHeuristics = apiKey != null && !hasFilePath
+  const mergedSource = shouldMergeHeuristics
+    ? mergeReviewResults(review, analyzeCodeHeuristics(reviewRequest))
+    : review
+  const merged = filterUnsupportedFindings(reviewRequest, mergedSource)
+
+  const provider: ReviewProvider = apiKey ? 'groq' : 'mock'
+
+  return {
+    review: merged,
+    debug: buildReviewDebugMetadata(reviewRequest, provider),
+  }
 }

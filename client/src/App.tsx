@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import './App.css'
 import { API_URL } from './lib/api'
 
@@ -7,6 +7,29 @@ type ReviewResult = {
   securityIssues: string[]
   codeQuality: string[]
   improvements: string[]
+}
+
+type ReviewDebugMetadata = {
+  language: string
+  filePath: string | null
+  codeLength: number
+  codePreview: string
+  provider: 'groq' | 'mock'
+  detectedLanguage: string
+}
+
+type ReviewApiResponse = ReviewResult & {
+  _debug?: ReviewDebugMetadata
+}
+
+type ReviewDebugRequest = {
+  mode: 'paste-code' | 'github-file'
+  selectedLanguage: string
+  filePath: string | null
+  codeLength: number
+  codePreviewStart: string
+  codePreviewEnd: string
+  requestTimestamp: string
 }
 
 type Mode = 'code' | 'github'
@@ -149,6 +172,8 @@ function App() {
   const [loadingMessage, setLoadingMessage] = useState('')
   const [error, setError] = useState('')
   const [result, setResult] = useState<ReviewResult | null>(null)
+  const [reviewDebugRequest, setReviewDebugRequest] = useState<ReviewDebugRequest | null>(null)
+  const [reviewDebugResponse, setReviewDebugResponse] = useState<ReviewApiResponse | null>(null)
   const [history, setHistory] = useState<ReviewHistoryItem[]>([])
   const [copyStatus, setCopyStatus] = useState('')
   const [githubUrl, setGithubUrl] = useState('')
@@ -174,6 +199,9 @@ function App() {
   )
   const [githubFileLoading, setGithubFileLoading] = useState(false)
   const [githubFileError, setGithubFileError] = useState('')
+  const activeReviewRequestIdRef = useRef(0)
+  const activeReviewAbortControllerRef = useRef<AbortController | null>(null)
+  const isDevelopment = import.meta.env.DEV
 
   const cards = useMemo(
     () => [
@@ -229,17 +257,50 @@ function App() {
     setHistory((currentHistory) => [nextItem, ...currentHistory].slice(0, 5))
   }
 
+  const cancelActiveReviewRequest = () => {
+    activeReviewAbortControllerRef.current?.abort()
+    activeReviewAbortControllerRef.current = null
+  }
+
+  const clearReviewUiState = () => {
+    setResult(null)
+    setReviewDebugRequest(null)
+    setReviewDebugResponse(null)
+  }
+
   const runReview = async (
     sourceCode: string,
     sourceLanguage: string,
     message: string,
     filePath?: string,
   ) => {
+    cancelActiveReviewRequest()
+
+    const requestId = activeReviewRequestIdRef.current + 1
+    activeReviewRequestIdRef.current = requestId
+    const abortController = new AbortController()
+    activeReviewAbortControllerRef.current = abortController
+    const requestTimestamp = new Date().toISOString()
+    const reviewMode = filePath ? 'github-file' : 'paste-code'
+    const codePreviewStart = sourceCode.slice(0, 300)
+    const codePreviewEnd =
+      sourceCode.length <= 300 ? sourceCode : sourceCode.slice(-300)
+
     setError('')
     setLoading(true)
     setLoadingMessage(message)
     setCopyStatus('')
     setResult(null)
+    setReviewDebugRequest({
+      mode: reviewMode,
+      selectedLanguage: sourceLanguage,
+      filePath: filePath ?? null,
+      codeLength: sourceCode.length,
+      codePreviewStart,
+      codePreviewEnd,
+      requestTimestamp,
+    })
+    setReviewDebugResponse(null)
 
     try {
       const response = await fetch(`${API_URL}/api/review`, {
@@ -247,6 +308,7 @@ function App() {
         headers: {
           'Content-Type': 'application/json',
         },
+        signal: abortController.signal,
         body: JSON.stringify({
           code: sourceCode,
           language: sourceLanguage,
@@ -254,30 +316,55 @@ function App() {
         }),
       })
 
-      const data = (await response.json()) as ReviewResult & { error?: string }
+      const data = (await response.json()) as ReviewApiResponse & { error?: string }
+
+      if (activeReviewRequestIdRef.current !== requestId) {
+        return
+      }
 
       if (!response.ok) {
         throw new Error(data.error ?? 'Unable to review code right now.')
       }
 
-      setResult(data)
+      setResult({
+        bugs: data.bugs,
+        securityIssues: data.securityIssues,
+        codeQuality: data.codeQuality,
+        improvements: data.improvements,
+      })
+      setReviewDebugResponse(data)
       updateHistory({
         id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         code: sourceCode,
         language: sourceLanguage,
-        result: data,
+        result: {
+          bugs: data.bugs,
+          securityIssues: data.securityIssues,
+          codeQuality: data.codeQuality,
+          improvements: data.improvements,
+        },
         timestamp: new Date().toISOString(),
       })
     } catch (submitError) {
+      if (abortController.signal.aborted || activeReviewRequestIdRef.current !== requestId) {
+        return
+      }
+
       const message =
         submitError instanceof Error
           ? submitError.message
           : 'Something went wrong while calling the review API.'
       setError(message)
       setResult(null)
+      setReviewDebugResponse(null)
     } finally {
-      setLoading(false)
-      setLoadingMessage('')
+      if (activeReviewRequestIdRef.current === requestId) {
+        setLoading(false)
+        setLoadingMessage('')
+        if (activeReviewAbortControllerRef.current === abortController) {
+          activeReviewAbortControllerRef.current = null
+        }
+      }
     }
   }
 
@@ -311,9 +398,12 @@ function App() {
   }
 
   const handleLoadHistoryItem = (item: ReviewHistoryItem) => {
+    cancelActiveReviewRequest()
     setCode(item.code)
     setLanguage(isCodeLanguage(item.language) ? item.language : 'TypeScript')
     setResult(item.result)
+    setReviewDebugRequest(null)
+    setReviewDebugResponse(null)
     setError('')
     setCopyStatus('')
   }
@@ -337,7 +427,7 @@ function App() {
     setMultiFileReviewError('')
     setSelectedGitHubFile(null)
     setGithubFileError('')
-    setResult(null)
+    clearReviewUiState()
 
     if (!githubUrl.trim()) {
       setGithubError('Please enter a GitHub repository URL.')
@@ -489,10 +579,11 @@ function App() {
   }
 
   const handleSelectGitHubFile = async (path: string) => {
+    cancelActiveReviewRequest()
     setGithubFileError('')
     setGithubFileLoading(true)
     setSelectedGitHubFile(null)
-    setResult(null)
+    clearReviewUiState()
 
     try {
       const response = await fetch(
@@ -548,6 +639,7 @@ function App() {
   }
 
   const handleModeChange = (nextMode: Mode) => {
+    cancelActiveReviewRequest()
     setMode(nextMode)
     setError('')
     setGithubError('')
@@ -561,7 +653,7 @@ function App() {
     setMultiFileReviewError('')
     setGithubFileError('')
     setCopyStatus('')
-    setResult(null)
+    clearReviewUiState()
   }
 
   const handleReviewSelectedFile = async () => {
@@ -1175,6 +1267,98 @@ function App() {
             </article>
           ))}
         </div>
+
+        {isDevelopment ? (
+          <details className="debug-panel">
+            <summary>Debug Review Panel</summary>
+
+            <div className="debug-panel__grid">
+              <div className="debug-panel__section">
+                <h3>Request</h3>
+                {reviewDebugRequest ? (
+                  <dl className="debug-panel__list">
+                    <div>
+                      <dt>Review mode</dt>
+                      <dd>{reviewDebugRequest.mode}</dd>
+                    </div>
+                    <div>
+                      <dt>Selected file path</dt>
+                      <dd>{reviewDebugRequest.filePath ?? 'None'}</dd>
+                    </div>
+                    <div>
+                      <dt>Selected language</dt>
+                      <dd>{reviewDebugRequest.selectedLanguage}</dd>
+                    </div>
+                    <div>
+                      <dt>Code length</dt>
+                      <dd>{reviewDebugRequest.codeLength}</dd>
+                    </div>
+                    <div>
+                      <dt>Request timestamp</dt>
+                      <dd>{formatTimestamp(reviewDebugRequest.requestTimestamp)}</dd>
+                    </div>
+                  </dl>
+                ) : (
+                  <p className="history-empty">Start a review to inspect the latest payload.</p>
+                )}
+
+                {reviewDebugRequest ? (
+                  <div className="debug-panel__previews">
+                    <div>
+                      <h4>First 300 characters</h4>
+                      <pre>{reviewDebugRequest.codePreviewStart || '(empty)'}</pre>
+                    </div>
+                    <div>
+                      <h4>Last 300 characters</h4>
+                      <pre>{reviewDebugRequest.codePreviewEnd || '(empty)'}</pre>
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+
+              <div className="debug-panel__section">
+                <h3>Response</h3>
+                {reviewDebugResponse ? (
+                  <dl className="debug-panel__list">
+                    <div>
+                      <dt>Detected language</dt>
+                      <dd>{reviewDebugResponse._debug?.detectedLanguage ?? 'Unavailable'}</dd>
+                    </div>
+                    <div>
+                      <dt>Backend provider</dt>
+                      <dd>{reviewDebugResponse._debug?.provider ?? 'Unavailable'}</dd>
+                    </div>
+                    <div>
+                      <dt>Backend code length</dt>
+                      <dd>{reviewDebugResponse._debug?.codeLength ?? 'Unavailable'}</dd>
+                    </div>
+                    <div>
+                      <dt>Backend file path</dt>
+                      <dd>{reviewDebugResponse._debug?.filePath ?? 'None'}</dd>
+                    </div>
+                    <div>
+                      <dt>Backend selected language</dt>
+                      <dd>{reviewDebugResponse._debug?.language ?? 'Unavailable'}</dd>
+                    </div>
+                  </dl>
+                ) : (
+                  <p className="history-empty">
+                    No response yet. Run a review to inspect the backend payload.
+                  </p>
+                )}
+
+                <div className="debug-panel__raw">
+                  <h4>Raw backend JSON</h4>
+                  <pre>
+                    {reviewDebugResponse
+                      ? JSON.stringify(reviewDebugResponse, null, 2)
+                      : 'Waiting for response...'}
+                  </pre>
+                </div>
+              </div>
+            </div>
+          </details>
+        ) : null}
       </section>
 
       {mode === 'code' ? (
